@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use Bayora in your research or AI safety verification, please cite it as below."
+title: "Bayora: Secure Multi-Tenant Adversarial AI Safety Testing Architecture Platform"
+abstract: "A reference implementation and formal verification platform for isolating mutually distrusting Red Teams, Blue Teams, and Subject-Under-Test LLMs on shared infrastructure with cryptographic WORM audit provenance."
+version: 1.0.0
+date-released: 2026-09-27
+authors:
+  - family-names: "Red Team & Architecture Working Group"
+    given-names: "Bayora"
+keywords:
+  - "ai-safety"
+  - "adversarial-testing"
+  - "red-teaming"
+  - "confidential-computing"
+  - "worm-audit"
+  - "merkle-tree"
+  - "ebpf"
+license: "Apache-2.0"
+repository-code: "https://github.com/bayora-redteam/bayora-secure-ai-safety"

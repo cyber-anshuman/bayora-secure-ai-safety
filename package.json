@@ -1,0 +1,37 @@
+{
+  "name": "bayora-secure-ai-safety",
+  "version": "1.0.0",
+  "description": "Production Reference Implementation of the Bayora Secure AI Safety Testing Architecture",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node test/poc_tests.js",
+    "test:attacks": "node test/attack_sim_tests.js",
+    "test:all": "node test/poc_tests.js && node test/attack_sim_tests.js"
+  },
+  "keywords": [
+    "ai-safety",
+    "red-teaming",
+    "sandboxing",
+    "information-flow",
+    "zero-trust",
+    "worm-audit",
+    "merkle-tree"
+  ],
+  "author": "Bayora Architecture Team",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bayora-redteam/bayora-secure-ai-safety.git"
+  },
+  "bugs": {
+    "url": "https://github.com/bayora-redteam/bayora-secure-ai-safety/issues"
+  },
+  "homepage": "https://github.com/bayora-redteam/bayora-secure-ai-safety#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
