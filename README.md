@@ -1,17 +1,21 @@
 <div align="center">
 
+![Bayora Platform Banner](assets/banner.png)
+
 # 🛡️ BAYORA
 
-### Secure AI Safety Testing Architecture Platform &bull; v2.0 Redesign
-**Hack in hILL Submission &bull; Advanced Adversarial AI Verification Framework**
+### Secure Multi-Tenant Adversarial AI Safety Testing Architecture Platform
+**Hack in hILL Advanced Verification Framework &bull; Production Reference Implementation**
 
-[![CI](https://github.com/bayora-redteam/bayora-secure-ai-safety/actions/workflows/ci.yml/badge.svg)](https://github.com/bayora-redteam/bayora-secure-ai-safety/actions)
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Isolation Tier](https://img.shields.io/badge/Isolation-Kata_microVM-cyan.svg)](#2-isolation-architecture)
-[![Network](https://img.shields.io/badge/CNI-Cilium_eBPF_Default--Deny-emerald.svg)](#3-network-security)
-[![PoC Tests](https://img.shields.io/badge/PoC_Tests-9%2F9_Passed-brightgreen.svg)](#automated-testing--adversarial-simulations)
+[![CI](https://github.com/cyber-anshuman/bayora-secure-ai-safety/actions/workflows/ci.yml/badge.svg)](https://github.com/cyber-anshuman/bayora-secure-ai-safety/actions)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Isolation Tier](https://img.shields.io/badge/Isolation-Kata_microVM-cyan.svg)](#-system-architecture--trust-boundaries)
+[![Network](https://img.shields.io/badge/CNI-Cilium_eBPF_Default--Deny-emerald.svg)](#-system-architecture--trust-boundaries)
+[![PoC Tests](https://img.shields.io/badge/PoC_Tests-9%2F9_Passed-brightgreen.svg)](#1-poc-demonstration-suite-section-s)
 [![Attack Simulations](https://img.shields.io/badge/Attack_Simulations-7%2F7_Mitigated-success.svg)](#2-adversarial-attack-simulations-section-t)
 [![Datasets](https://img.shields.io/badge/Datasets-8_Integrated-purple.svg)](#-integrated-benchmark-datasets--resources)
+[![Node](https://img.shields.io/badge/Node-%3E%3D18.0.0-orange.svg)](package.json)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
 <br/>
 
@@ -179,8 +183,19 @@ Bayora integrates 8 leading AI safety, adversarial red-teaming, and forensic pro
 
 ## 🖥️ Interactive Web Operations Dashboard
 
-The platform includes a futuristic cybersecurity command center:
+The platform includes a futuristic cybersecurity command center accessible at `http://localhost:3000`:
 
+| Architecture & Trust Topology (§E, §Q) | 7 Adversarial Attack Simulations (§T) |
+| :---: | :---: |
+| ![Architecture Topology](assets/demo_topology.png) | ![Attack Simulation Lab](assets/demo_attacks.png) |
+| *Interactive SVG topology showing Kata microVMs, Cilium filters, and OPA PDP* | *Real-time packet logs verifying mitigation of all 7 adversarial exploits* |
+
+| WORM Audit Store & Tamper Detector (§M) | Integrated Benchmark Datasets Hub |
+| :---: | :---: |
+| ![WORM Audit Explorer](assets/demo_audit.png) | ![Datasets Hub](assets/demo_datasets.png) |
+| *Cryptographic SHA-256 hash chaining, Merkle root tree & live tamper alarm* | *8 standard benchmarks (AdvBench, JBB, HarmBench, ToxiGen, Lakera, etc.)* |
+
+### Key Dashboard Capabilities:
 - **Interactive Topology Inspector (§E, §Q)**: SVG diagram of Kata microVM containers, eBPF filters, and control-plane components. Click any node to view active cgroups, dropped capabilities, and active policies.
 - **Live 7-Phase Session Runner**: Step-by-step or auto-run state stepper with real-time Evaluation Integrity badges and disclosure bundle views.
 - **Adversarial Attack Simulation Lab (§T)**: 1-click execution of the 7 adversarial attack vectors with live animated terminal packet logs.
