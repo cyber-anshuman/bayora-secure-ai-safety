@@ -11,20 +11,23 @@ class VaultAuthority {
     this.secretKey = secretKey;
     this.activeTokens = new Map();
     this.revokedTokens = new Set();
+    this.defaultTtlMs = Number(process.env.VAULT_TOKEN_TTL_MS) || 60000;
+    this.allowRefresh = process.env.VAULT_ALLOW_REFRESH === 'true';
   }
 
   /**
    * Issue a short-lived, action-scoped capability token for a specific tenant and session.
-   * TTL: defaults to 300 seconds (5 mins).
+   * TTL: defaults to VAULT_TOKEN_TTL_MS (or 60s / custom ttlSeconds).
    */
-  issueToken({ tenantId, sessionId, allowedActions, ttlSeconds = 300 }) {
+  issueToken({ tenantId, sessionId, allowedActions, ttlSeconds = undefined }) {
     if (!tenantId || !sessionId || !allowedActions) {
       throw new Error('Missing required token parameters: tenantId, sessionId, allowedActions');
     }
 
     const tokenId = `tok_${crypto.randomBytes(12).toString('hex')}`;
     const issuedAt = Date.now();
-    const expiresAt = issuedAt + (ttlSeconds * 1000);
+    const ttlMs = (ttlSeconds !== undefined && ttlSeconds !== null) ? (ttlSeconds * 1000) : this.defaultTtlMs;
+    const expiresAt = issuedAt + ttlMs;
 
     const payload = {
       tokenId,
@@ -43,7 +46,8 @@ class VaultAuthority {
   }
 
   _sign(payload) {
-    const data = `${payload.tokenId}:${payload.tenantId}:${payload.sessionId}:${payload.allowedActions.sort().join(',')}:${payload.expiresAt}`;
+    const actions = Array.isArray(payload.allowedActions) ? [...payload.allowedActions].sort().join(',') : '';
+    const data = `${payload.tokenId}:${payload.tenantId}:${payload.sessionId}:${actions}:${payload.expiresAt}`;
     return crypto.createHmac('sha256', this.secretKey).update(data).digest('hex');
   }
 
@@ -77,6 +81,25 @@ class VaultAuthority {
     }
 
     return { valid: true, tenantId: token.tenantId, sessionId: token.sessionId };
+  }
+
+  /**
+   * Refresh an active capability token if allowed by configuration (§J)
+   */
+  refreshToken(token) {
+    if (!this.allowRefresh) {
+      return { success: false, reason: 'E_REFRESH_DISABLED: Token refresh disallowed by configuration' };
+    }
+    const validation = this.validateCapability(token, token && token.allowedActions && token.allowedActions[0], token && token.sessionId);
+    if (!validation.valid) {
+      return { success: false, reason: validation.reason };
+    }
+    const refreshed = this.issueToken({
+      tenantId: token.tenantId,
+      sessionId: token.sessionId,
+      allowedActions: token.allowedActions
+    });
+    return { success: true, token: refreshed };
   }
 
   revokeToken(tokenId) {

@@ -19,5 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Full Proof-of-Concept & Attack Test Suites**:
   - `npm test`: 9 / 9 PoC claims verified (§S).
   - `npm run test:attacks`: 7 / 7 adversarial attacks mitigated (§T).
+- **Real Runtime Worker-Threads Memory Isolation**: Hardened Red and Blue sandbox processing in dedicated Node.js `worker_threads` with strict V8 heap `resourceLimits` (`maxOldGenerationSizeMb: 64`, `maxYoungGenerationSizeMb: 16`, `codeRangeSizeMb: 16`, `stackSizeMb: 4`) and unshared VM contexts, accompanied by a dedicated isolation verification test suite (`npm run test:isolation`).
+- **Subsystems Unit Test Suite & Branch Hardening**: Expanded unit testing across state machine transition guards, side-channel error taxonomy canonicalization, and vault capability token validation (`npm run test:unit`), lifting line coverage to 94.73% and branch coverage to 84.28%.
 - **Interactive Cyber Operations Web UI**: Real-time SVG topology visualizer, live state machine executor, interactive attack laboratory, WORM audit log explorer with tamper simulation, and Datasets Explorer.
 - **Enterprise GitHub Repository Assets**: CI/CD GitHub Actions workflow, Dockerfile, docker-compose, issue and PR templates, CONTRIBUTING, SECURITY, ARCHITECTURE, and Apache 2.0 license.

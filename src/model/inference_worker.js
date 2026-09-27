@@ -8,16 +8,31 @@
 const crypto = require('crypto');
 
 class DedicatedInferenceWorker {
-  constructor(workerId = `worker_${crypto.randomBytes(4).toString('hex')}`) {
+  constructor(workerId = `worker_${crypto.randomBytes(4).toString('hex')}`, loadedWeightsId = null) {
     this.workerId = workerId;
     this.status = 'UNINITIALIZED'; // CREATE -> INITIALIZE -> TEST -> VERIFY -> DESTROY
-    this.pinnedWeightsHash = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+    this.pinnedWeightsHash = process.env.MODEL_WEIGHT_PIN_HASH || 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+    this.inferenceTimeoutMs = Number(process.env.INFERENCE_TIMEOUT_MS) || 10000;
     this.pinnedPromptHash = 'a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3';
+    this.loadedWeightsId = loadedWeightsId !== null && loadedWeightsId !== undefined ? loadedWeightsId : this.pinnedWeightsHash;
     this.kvCache = new Map(); // Strictly dedicated to this session
     this.sessionId = null;
     this.isContaminated = false; // Flag to simulate dirty state
     this.canaryBaseline = 'CANARY_CLEAN_BASELINE_OK_2026';
     this.canaryExpectedHash = crypto.createHash('sha256').update(this.canaryBaseline).digest('hex');
+  }
+
+  /**
+   * Derives a runtime hash from the worker's actual loaded state / loadedWeightsId.
+   */
+  _computeRuntimeWeightsHash() {
+    if (this.loadedWeightsId === this.pinnedWeightsHash) {
+      return this.pinnedWeightsHash;
+    }
+    if (typeof this.loadedWeightsId === 'string' && /^[a-f0-9]{64}$/i.test(this.loadedWeightsId)) {
+      return this.loadedWeightsId.toLowerCase();
+    }
+    return crypto.createHash('sha256').update(String(this.loadedWeightsId || '')).digest('hex');
   }
 
   /**
@@ -45,10 +60,12 @@ class DedicatedInferenceWorker {
     }
 
     // Verify pinned weight hash (detects model weight tampering / supply chain drift)
-    const currentWeightsHash = this.pinnedWeightsHash;
+    const currentWeightsHash = this._computeRuntimeWeightsHash();
     if (currentWeightsHash !== this.pinnedWeightsHash) {
-      this.status = 'HARNESS_ERROR';
-      throw new Error('Weight hash mismatch: snapshot integrity verification failed');
+      this.status = 'HARNESS_ERROR_CONFIG_DRIFT';
+      const err = new Error('HARNESS_ERROR_CONFIG_DRIFT: Weight hash mismatch: snapshot integrity verification failed');
+      err.code = 'HARNESS_ERROR_CONFIG_DRIFT';
+      throw err;
     }
 
     this.systemPrompt = systemPrompt;
@@ -69,6 +86,11 @@ class DedicatedInferenceWorker {
 
   /**
    * STEP 3: TEST - Perform single isolated inference turn
+   *
+   * NOTE: This is a deterministic scripted stand-in for a real LLM endpoint,
+   * used for reproducible demo behavior and automated test suite validation.
+   * A production deployment would call a real inference endpoint (e.g., vLLM or
+   * TGI worker) hosted within an isolated GPU container.
    */
   infer(prompt, options = {}) {
     if (this.status !== 'INITIALIZED' && this.status !== 'IN_TEST') {

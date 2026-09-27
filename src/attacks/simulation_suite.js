@@ -228,11 +228,24 @@ class AttackSimulationSuite {
    * Test 8 (§S.8): Boundary-violation detection & policy drift alert
    */
   async testBoundaryViolationDetection() {
-    // Simulate policy drift check comparing live rules vs declared baseline
-    const baselineRules = ['red->broker', 'blue->broker', 'broker->model', 'broker->red', 'broker->blue'];
-    const simulatedDriftRule = { from: 'red', to: 'blue', allowed: true }; // Unauthorized rule injected
+    // Inject unauthorized policy drift rule into live allow-list
+    const driftRule = { from: 'red', to: 'blue', allowed: true };
+    this.opa.networkAllowList.push(driftRule);
 
-    const hasDrift = simulatedDriftRule.from === 'red' && simulatedDriftRule.to === 'blue';
+    const hasDrift = this.opa.networkAllowList.some(r => r.from === 'red' && r.to === 'blue');
+
+    // Route connection check through actual OpaPolicyEngine instance
+    const evalResult = this.opa.evaluateNetworkConnection('red', 'blue');
+
+    // Clean up injected rule from live allow-list
+    const driftIdx = this.opa.networkAllowList.indexOf(driftRule);
+    if (driftIdx !== -1) {
+      this.opa.networkAllowList.splice(driftIdx, 1);
+    }
+
+    // Defense-in-depth: Even with drifted allow-list, structural deny must reject connection
+    const structuralDenyEnforced = (evalResult.verdict === 'DENY');
+
     const driftAlert = hasDrift ? {
       alertType: 'POLICY_DRIFT_SECURITY_CRITICAL',
       severity: 'CRITICAL',
@@ -244,8 +257,48 @@ class AttackSimulationSuite {
       testId: 'POC-TEST-08',
       claim: 'Boundary-violation detection alerts on policy drift',
       driftDetected: hasDrift,
+      connectionVerdict: evalResult.verdict,
+      connectionReason: evalResult.reason,
+      structuralDenyEnforced,
       alert: driftAlert,
-      passed: hasDrift && driftAlert.severity === 'CRITICAL'
+      passed: hasDrift && structuralDenyEnforced && driftAlert.severity === 'CRITICAL'
+    };
+  }
+
+  /**
+   * Unit Test: DedicatedInferenceWorker Weight-Integrity Verification (Issue 1)
+   * Asserts that mismatched loadedWeightsId throws/returns HARNESS_ERROR_CONFIG_DRIFT,
+   * while matching hash successfully initializes.
+   */
+  testWorkerWeightIntegrity() {
+    // 1. Happy path: matching default loadedWeightsId
+    const cleanWorker = new DedicatedInferenceWorker('worker-clean');
+    cleanWorker.create('session-clean');
+    const initRes = cleanWorker.initialize();
+    const happyPassed = (cleanWorker.status === 'INITIALIZED' && initRes.weightsHash === cleanWorker.pinnedWeightsHash);
+
+    // 2. Negative path: deliberately mismatched loadedWeightsId
+    const driftedWorker = new DedicatedInferenceWorker('worker-mismatched', 'deliberately_mismatched_weights_payload_123');
+    driftedWorker.create('session-mismatched');
+    let caughtErr = null;
+    try {
+      driftedWorker.initialize();
+    } catch (err) {
+      caughtErr = err;
+    }
+
+    const driftDetected = caughtErr !== null &&
+      (caughtErr.code === 'HARNESS_ERROR_CONFIG_DRIFT' || caughtErr.message.includes('HARNESS_ERROR_CONFIG_DRIFT')) &&
+      driftedWorker.status === 'HARNESS_ERROR_CONFIG_DRIFT';
+
+    return {
+      testId: 'UNIT-TEST-WEIGHTS',
+      claim: 'Model weight-integrity verification (happy path & HARNESS_ERROR_CONFIG_DRIFT)',
+      happyPathPassed: happyPassed,
+      driftCaught: driftDetected,
+      driftErrorCode: caughtErr ? (caughtErr.code || 'HARNESS_ERROR_CONFIG_DRIFT') : null,
+      workerStatus: driftedWorker.status,
+      passed: happyPassed && driftDetected
     };
   }
 
@@ -312,7 +365,7 @@ class AttackSimulationSuite {
         { target: 'Host /proc / ptrace', result: ptrace.verdict, reason: ptrace.reason, blocked: ptrace.verdict === 'DENY' }
       ],
       auditEventHash: auditLogged.entryHash,
-      mitigationCertified: true
+      mitigationCertified: imds.verdict === 'DENY' && peer.verdict === 'DENY' && ptrace.verdict === 'DENY'
     };
   }
 

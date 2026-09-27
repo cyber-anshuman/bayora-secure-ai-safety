@@ -24,6 +24,14 @@ async function run() {
     }
   });
 
+  const weightTest = suite.testWorkerWeightIntegrity();
+  const weightSymbol = weightTest.passed ? '✓ PASS' : '✗ FAIL';
+  console.log(`[${weightSymbol}] [${weightTest.testId}] ${weightTest.claim}`);
+  if (!weightTest.passed) {
+    allPassed = false;
+    console.log('       Details:', JSON.stringify(weightTest, null, 2));
+  }
+
   console.log('\n------------------------------------------------------------------------');
   if (allPassed) {
     console.log(`SUCCESS: All ${results.length} PoC demonstration tests passed cleanly!`);

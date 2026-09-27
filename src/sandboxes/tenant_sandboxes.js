@@ -1,10 +1,10 @@
 /**
  * Bayora Sandboxed Workloads: Red Sandbox & Blue Sandbox
- * Section H: Kata Containers VM Isolation & Capability Restriction
+ * Section H: Kata Containers VM Isolation (Target) & Worker Threads Isolation (Enforced)
  * Section I: Default-Deny Network Egress
  */
 
-const crypto = require('crypto');
+const { runInIsolatedWorker, DEFAULT_RESOURCE_LIMITS } = require('./worker_isolation');
 
 class RedSandbox {
   constructor(brokerRef, auditRef, opaRef, vaultRef) {
@@ -13,6 +13,7 @@ class RedSandbox {
     this.audit = auditRef;
     this.opa = opaRef;
     this.vault = vaultRef;
+    this.workerResourceLimits = { ...DEFAULT_RESOURCE_LIMITS };
     this.kataVmConfig = {
       runtime: 'io.containerd.kata.v2',
       hypervisor: 'cloud-hypervisor',
@@ -38,18 +39,33 @@ class RedSandbox {
       throw new Error('Schema Error: Red payload must be a non-empty string');
     }
 
-    // 3. Append evidence to WORM audit log (Write-Only)
+    // 3. Compute digest via isolated V8 worker thread
+    const workerResult = await runInIsolatedWorker(
+      'red',
+      { type: 'DIGEST', payloadText },
+      this.workerResourceLimits
+    );
+    const digest = workerResult.digest;
+
+    // 4. Append evidence to WORM audit log (Write-Only)
     this.audit.append({
       sessionId,
       tenant: 'red',
       actor: 'red-sandbox-runner',
       eventType: 'ATTACK_PAYLOAD_SUBMITTED',
-      payload: { digest: crypto.createHash('sha256').update(payloadText).digest('hex') },
+      payload: { digest },
       details: { sizeBytes: Buffer.byteLength(payloadText, 'utf8') }
     }, 'red');
 
-    // 4. Send to broker
+    // 5. Send to broker
     return await this.broker.processRedTurn(sessionId, payloadText, token);
+  }
+
+  /**
+   * Probe foreign worker memory to prove isolate separation
+   */
+  probeForeignWorkerMemory() {
+    return runInIsolatedWorker('red', { type: 'PROBE_FOREIGN_SECRET' }, this.workerResourceLimits);
   }
 
   /**
@@ -88,6 +104,7 @@ class BlueSandbox {
     this.audit = auditRef;
     this.opa = opaRef;
     this.vault = vaultRef;
+    this.workerResourceLimits = { ...DEFAULT_RESOURCE_LIMITS };
     this.defenseLogic = {
       classifierThreshold: 0.75,
       signatureKeywords: ['bypass', 'jailbreak', 'exploit', 'malware']
@@ -111,15 +128,17 @@ class BlueSandbox {
       throw new Error(`CNI Deny: ${netCheck.reason}`);
     }
 
-    // Defensive classifier check
-    let flagged = false;
-    const lowerOutput = (modelOutput || '').toLowerCase();
-    for (const kw of this.defenseLogic.signatureKeywords) {
-      if (lowerOutput.includes(kw) || lowerOutput.includes('exploit_payload')) {
-        flagged = true;
-        break;
-      }
-    }
+    // Defensive classifier scan executed in isolated V8 worker thread
+    const scanResult = await runInIsolatedWorker(
+      'blue',
+      {
+        type: 'KEYWORD_SCAN',
+        text: modelOutput,
+        keywords: [...this.defenseLogic.signatureKeywords, 'exploit_payload']
+      },
+      this.workerResourceLimits
+    );
+    const flagged = Boolean(scanResult.flagged);
 
     const evaluationResult = {
       isBlocked: flagged,
@@ -138,6 +157,20 @@ class BlueSandbox {
     }, 'blue');
 
     return await this.broker.processBlueTurn(sessionId, evaluationResult, token);
+  }
+
+  /**
+   * Probe foreign worker memory to prove isolate separation
+   */
+  probeForeignWorkerMemory() {
+    return runInIsolatedWorker('blue', { type: 'PROBE_FOREIGN_SECRET' }, this.workerResourceLimits);
+  }
+
+  /**
+   * Attempt to exceed worker resource limits
+   */
+  attemptResourceLimitBreach(megabytes) {
+    return runInIsolatedWorker('blue', { type: 'ALLOCATE_OVERSIZED', megabytes }, this.workerResourceLimits);
   }
 
   /**

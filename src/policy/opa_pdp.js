@@ -8,6 +8,7 @@
 
 class OpaPolicyEngine {
   constructor() {
+    this.strictEbpf = process.env.ENABLE_STRICT_EBPF !== 'false';
     this.networkAllowList = [
       { from: 'red', to: 'broker', allowed: true },
       { from: 'blue', to: 'broker', allowed: true },

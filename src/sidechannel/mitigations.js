@@ -7,7 +7,10 @@
 
 class SideChannelMitigations {
   constructor() {
-    this.bucketIntervalMs = 250;
+    this.enableTimingQuantization = process.env.ENABLE_TIMING_QUANTIZATION !== 'false';
+    this.bucketIntervalMs = Number(process.env.TIMING_BUCKET_MS) || 250;
+    this.enableHardwareAntiAffinity = process.env.ENABLE_HARDWARE_ANTI_AFFINITY !== 'false';
+    this.metricResolutionMs = Number(process.env.METRIC_BUCKET_RESOLUTION_MS) || 10000;
     this.canonicalErrors = {
       E_AUTH_FAILED: { code: 'SEC_ERR_01', message: 'Authentication or capability verification failed' },
       E_POLICY_DENIED: { code: 'SEC_ERR_02', message: 'Request denied by policy engine' },
@@ -23,6 +26,7 @@ class SideChannelMitigations {
    * Prevents cross-tenant timing inference (e.g. inferring payload length or classifier complexity).
    */
   quantizeResponseTime(rawElapsedMs) {
+    if (!this.enableTimingQuantization) return rawElapsedMs;
     if (rawElapsedMs <= 0) return this.bucketIntervalMs;
     return Math.ceil(rawElapsedMs / this.bucketIntervalMs) * this.bucketIntervalMs;
   }
@@ -65,6 +69,9 @@ class SideChannelMitigations {
    * Assign tenant to isolated NUMA/Node slot (Anti-affinity simulation)
    */
   getIsolatedNodeAssignment(tenant) {
+    if (!this.enableHardwareAntiAffinity) {
+      return { node: 'shared-node-worker', cpuset: '0-11', numaDomain: 0 };
+    }
     const assignments = {
       red: { node: 'node-worker-alpha-kata', cpuset: '0-3', numaDomain: 0 },
       blue: { node: 'node-worker-beta-kata', cpuset: '4-7', numaDomain: 1 },

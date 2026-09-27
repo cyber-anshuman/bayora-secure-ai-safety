@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Security Vulnerability Disclosure
-    url: https://github.com/bayora-redteam/bayora-secure-ai-safety/security/policy
+    url: https://github.com/cyber-anshuman/bayora-secure-ai-safety/security/policy
     about: Please report security vulnerabilities privately via our security advisory process.
   - name: Architecture Questions & Discussions
-    url: https://github.com/bayora-redteam/bayora-secure-ai-safety/discussions
+    url: https://github.com/cyber-anshuman/bayora-secure-ai-safety/discussions
     about: Ask questions or discuss design decisions with the architecture maintainers.

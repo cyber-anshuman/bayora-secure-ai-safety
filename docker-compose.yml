@@ -20,7 +20,7 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/status"]
+      test: [ "CMD", "wget", "-qO-", "http://localhost:3000/api/status" ]
       interval: 15s
       timeout: 5s
       retries: 3

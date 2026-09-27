@@ -3,109 +3,104 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Bayora — Secure AI Safety Testing Architecture</title>
-  <meta name="description" content="Reference implementation of the Bayora secure AI safety testing platform featuring Kata microVM isolation, mandatory mediation broker, WORM audit log, and canary verification.">
+  <title>Bayora — AI Safety Adversarial Verification Docket</title>
+  <meta name="description" content="Reference implementation of the Bayora secure AI safety testing platform featuring runtime worker_threads memory isolation (Kata microVM target architecture), mandatory mediation broker, WORM audit log, and canary verification.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Lora:ital,wght@0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="css/style.css">
 </head>
-<body class="theme-dark">
-  <!-- Top Navigation Header -->
+<body class="docket-app">
+  <!-- Top Navigation Header (Row 1 of Chrome) -->
   <header class="app-header">
     <div class="header-branding">
       <div class="logo-shield">
-        <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" fill="rgba(6, 182, 212, 0.15)" stroke="#06b6d4"/>
-          <path d="M12 8v8M8 12h8" stroke="#10b981" stroke-linecap="round"/>
+        <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.75">
+          <circle cx="12" cy="12" r="10" stroke="#1f3a60" fill="#f6f5f1"/>
+          <path d="M12 6v12M6 12h12" stroke="#dcd7cb" stroke-width="1"/>
+          <path d="M12 2l2.5 5 5.5.5-4 4 1 5.5-5-3-5 3 1-5.5-4-4 5.5-.5z" fill="#1f3a60" stroke="#1f3a60" stroke-width="0.5"/>
         </svg>
       </div>
       <div>
-        <h1 class="platform-title">BAYORA <span class="badge-v2">REDTEAM v2.0</span></h1>
-        <p class="platform-subtitle">Secure AI Safety Testing Architecture & Adversarial Verification Platform</p>
+        <h1 class="platform-title">BAYORA <span class="docket-tag">VERIFICATION DOSSIER</span></h1>
+        <p class="platform-subtitle">Adversarial AI Safety Testing Architecture &bull; Cryptographic Chain-of-Custody</p>
       </div>
     </div>
 
-    <!-- Security Status Bar -->
-    <div class="header-status-strip">
-      <div class="status-pill status-kata" title="Kata VM hardware-virtualized boundary across all sandboxes">
-        <span class="status-dot green pulse"></span>
-        <span class="pill-label">ISOLATION:</span>
-        <span class="pill-val">Kata microVM</span>
+    <!-- Header Actions: Compact Status Summary, Role Perspective Dropdown, Reset Button -->
+    <div class="header-actions">
+      <!-- Single Compact Status Summary Dropdown -->
+      <div class="status-summary-dropdown" id="statusSummaryDropdown">
+        <button class="status-summary-btn" id="statusSummaryBtn" aria-haspopup="true" aria-expanded="false" title="Click to view subsystem isolation and audit statuses">
+          <span class="status-dot green" id="auditStatusDot"></span>
+          <span id="statusSummaryText">All Systems Nominal</span>
+          <span class="dropdown-caret">▾</span>
+        </button>
+        <div class="status-popover" id="statusPopover" role="menu">
+          <div class="popover-row">
+            <span class="popover-k">Isolation Boundary:</span>
+            <span class="popover-v">worker_threads (Kata target)</span>
+          </div>
+          <div class="popover-row">
+            <span class="popover-k">CNI Network Filter:</span>
+            <span class="popover-v">Default-Deny (Modeled)</span>
+          </div>
+          <div class="popover-row">
+            <span class="popover-k">WORM Audit Store:</span>
+            <span class="popover-v" id="popoverAuditStatus">Chain Intact (SHA-256)</span>
+          </div>
+          <div class="popover-row">
+            <span class="popover-k">Broker Mediation:</span>
+            <span class="popover-v">OPA PDP Gated</span>
+          </div>
+        </div>
       </div>
-      <div class="status-pill status-cni" title="Cilium eBPF Default-Deny network policy active">
-        <span class="status-dot green"></span>
-        <span class="pill-label">CNI:</span>
-        <span class="pill-val">Default-Deny eBPF</span>
+
+      <!-- Active Role Perspective Dropdown with Tooltip -->
+      <div class="role-select-container" id="roleSelectWrap" title="Broker View: Full mediation authority, OPA PDP policy checking, and capability verification.">
+        <label for="roleSelect" class="role-select-label">Perspective:</label>
+        <select id="roleSelect" class="role-dropdown">
+          <option value="broker" selected>🛡️ Broker (Orchestrator)</option>
+          <option value="red">🔴 Red Team Sandbox</option>
+          <option value="blue">🔵 Blue Team Sandbox</option>
+          <option value="auditor">📜 Security Auditor</option>
+        </select>
       </div>
-      <div class="status-pill status-audit" id="headerAuditStatus" title="SHA-256 Hash Chained WORM Audit Store">
-        <span class="status-dot green" id="auditStatusDot"></span>
-        <span class="pill-label">WORM AUDIT:</span>
-        <span class="pill-val" id="auditStatusText">Chain Intact</span>
-      </div>
-      <div class="status-pill status-broker" title="Mandatory-Mediation State Machine Broker">
-        <span class="status-dot green"></span>
-        <span class="pill-label">BROKER:</span>
-        <span class="pill-val">OPA PDP Gated</span>
-      </div>
-      <button class="btn-refresh" id="btnResetPlatform" title="Reset platform to clean golden state">
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+
+      <!-- Secondary Reset Button -->
+      <button class="btn-refresh btn-sm" id="btnResetPlatform" title="Reset platform to clean golden state">
+        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
           <path d="M3 3v5h5"/>
         </svg>
-        <span>Reset Golden State</span>
+        <span>Reset State</span>
       </button>
     </div>
   </header>
 
-  <!-- Perspective Banner (Information-Flow Filter) -->
-  <div class="perspective-bar">
-    <div class="perspective-left">
-      <span class="perspective-icon">👁️</span>
-      <span class="perspective-label">ACTIVE ROLE PERSPECTIVE:</span>
-      <div class="role-selector" id="roleSelector">
-        <button class="role-btn active" data-role="broker">🛡️ Broker / Orchestrator</button>
-        <button class="role-btn" data-role="red">🔴 Red Team Sandbox</button>
-        <button class="role-btn" data-role="blue">🔵 Blue Team Sandbox</button>
-        <button class="role-btn" data-role="auditor">📜 Security Auditor</button>
-      </div>
-    </div>
-    <div class="perspective-notice" id="perspectiveNotice">
-      <span>Broker View: Full mediation authority, OPA PDP policy checking, and capability verification.</span>
-    </div>
-  </div>
-
-  <!-- Primary Tab Navigation -->
-  <nav class="main-tabs">
+  <!-- Primary Tab Navigation (Row 2 of Chrome - Exactly 5 Visible Tabs, Zero Horizontal Scroll) -->
+  <nav class="main-tabs" id="mainTabsNav">
     <button class="tab-btn active" data-tab="tab-architecture">
-      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
-      <span>Architecture & Trust Boundaries</span>
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+      <span>Architecture & Isolation</span>
     </button>
     <button class="tab-btn" data-tab="tab-session">
-      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-      <span>Live Session Runner (7-Phase)</span>
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+      <span>Live Session Runner</span>
     </button>
     <button class="tab-btn" data-tab="tab-attacks">
-      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-      <span>Adversarial Attack Lab (§T)</span>
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      <span>Adversarial Attack Lab</span>
       <span class="tab-badge" id="attackCountBadge">7 Simulations</span>
     </button>
     <button class="tab-btn" data-tab="tab-audit">
-      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
-      <span>WORM Audit & Tamper Simulator (§M)</span>
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+      <span>WORM Audit Ledger</span>
     </button>
-    <button class="tab-btn" data-tab="tab-sidechannel">
-      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-      <span>Side-Channel & Telemetry Guard (§G, §N)</span>
-    </button>
-    <button class="tab-btn" data-tab="tab-checklist">
-      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
-      <span>PoC Demonstration Suite (§S)</span>
-    </button>
-    <button class="tab-btn" data-tab="tab-datasets">
-      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
-      <span>Datasets & Benchmarks (8 Sources)</span>
-      <span class="tab-badge" style="background:rgba(16,185,129,0.25); color:#6ee7b7; border-color:rgba(16,185,129,0.4);">8 Verified</span>
+    <button class="tab-btn" data-tab="tab-verification">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+      <span>PoC Claims & Benchmarks</span>
+      <span class="tab-badge" style="background:var(--certified-bg); color:var(--certified-clean); border-color:var(--certified-border);">9 Verified</span>
     </button>
   </nav>
 
@@ -118,147 +113,206 @@
         <div class="panel glass-card">
           <div class="panel-header">
             <h2>Interactive Trust Boundary & Network Topology (§E, §Q)</h2>
-            <span class="tag-accent">Cilium eBPF + Kata MicroVMs</span>
+            <span class="tag-accent">worker_threads Enforced &bull; Kata/Cilium Target</span>
           </div>
           <div class="panel-body">
             <p class="desc-text">
-              Every tenant workload runs inside an independent Kata hardware-virtualized microVM with non-shared cgroups.
-              Direct connections between Red ↔ Blue, Red ↔ Model, and Blue ↔ Model are structurally blocked at the network level.
+              Tenant workloads execute in dedicated Node.js worker_threads with enforced V8 resourceLimits (modeled as Kata microVMs with non-shared cgroups in target architecture).
+              Direct connections between Red ↔ Blue, Red ↔ Model, and Blue ↔ Model are structurally blocked at the policy level.
               Click any component to inspect active capabilities and isolation properties.
             </p>
 
             <div class="topology-container">
-              <svg id="topologySvg" viewBox="0 0 760 480" width="100%" height="440">
-                <!-- Defs for glowing gradients & markers -->
+              <svg id="topologySvg" viewBox="0 0 740 370" width="100%" height="370">
                 <defs>
-                  <linearGradient id="cyanGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-                    <stop offset="0%" stop-color="#06b6d4" stop-opacity="0.8"/>
-                    <stop offset="100%" stop-color="#0891b2" stop-opacity="0.2"/>
-                  </linearGradient>
-                  <linearGradient id="redGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-                    <stop offset="0%" stop-color="#ef4444" stop-opacity="0.8"/>
-                    <stop offset="100%" stop-color="#991b1b" stop-opacity="0.2"/>
-                  </linearGradient>
-                  <linearGradient id="blueGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-                    <stop offset="0%" stop-color="#3b82f6" stop-opacity="0.8"/>
-                    <stop offset="100%" stop-color="#1d4ed8" stop-opacity="0.2"/>
-                  </linearGradient>
-                  <linearGradient id="greenGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-                    <stop offset="0%" stop-color="#10b981" stop-opacity="0.8"/>
-                    <stop offset="100%" stop-color="#047857" stop-opacity="0.2"/>
-                  </linearGradient>
-                  <linearGradient id="purpleGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-                    <stop offset="0%" stop-color="#8b5cf6" stop-opacity="0.8"/>
-                    <stop offset="100%" stop-color="#6d28d9" stop-opacity="0.2"/>
-                  </linearGradient>
-                  <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
-                    <feGaussianBlur stdDeviation="3" result="blur" />
-                    <feComposite in="SourceGraphic" in2="blur" operator="over"/>
-                  </filter>
-                  <marker id="arrow" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-                    <path d="M 0 0 L 10 5 L 0 10 z" fill="#06b6d4"/>
+                  <marker id="arrow" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                    <path d="M 0 1 L 8 5 L 0 9 z" fill="#1f3a60"/>
                   </marker>
-                  <marker id="arrow-green" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-                    <path d="M 0 0 L 10 5 L 0 10 z" fill="#10b981"/>
-                  </marker>
-                  <marker id="arrow-red-blocked" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-                    <path d="M 0 0 L 10 5 L 0 10 z" fill="#ef4444"/>
+                  <marker id="arrow-green" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                    <path d="M 0 1 L 8 5 L 0 9 z" fill="#1b663e"/>
                   </marker>
                 </defs>
 
-                <!-- Background Boundary: Host / Cloud Untrusted -->
-                <rect x="15" y="15" width="730" height="450" rx="14" fill="#090e17" stroke="#1e293b" stroke-dasharray="6,4" stroke-width="1.5"/>
-                <text x="35" y="42" fill="#64748b" font-size="12" font-family="'Fira Code', monospace" font-weight="600">HOST / CLUSTER BOUNDARY (UNTRUSTED-BY-DEFAULT, ISOLATED NUMA DOMAINS)</text>
+                <!-- Background Boundary: Host / Untrusted Cluster -->
+                <rect x="10" y="10" width="720" height="350" rx="3" fill="#ffffff" stroke="#dcd7cb" stroke-width="1.25"/>
 
-                <!-- Control Plane Boundary -->
-                <rect x="230" y="55" width="300" height="135" rx="10" fill="#0f172a" stroke="#06b6d4" stroke-width="1.5"/>
-                <text x="245" y="77" fill="#38bdf8" font-size="11" font-weight="700" font-family="'Fira Code', monospace">CONTROL PLANE (LEAST PRIVILEGE)</text>
-
-                <!-- Broker Node -->
-                <g class="topo-node" id="nodeBroker" onclick="window.selectTopoNode('broker')">
-                  <rect x="250" y="90" width="260" height="42" rx="6" fill="url(#cyanGrad)" stroke="#22d3ee" stroke-width="1.5"/>
-                  <text x="270" y="116" fill="#f8fafc" font-size="13" font-weight="600">BROKER / STATE MACHINE</text>
-                  <text x="440" y="116" fill="#bae6fd" font-size="10" font-family="'Fira Code'">7-PHASE</text>
+                <!-- Control Plane: OPA PDP, Broker, Vault -->
+                <!-- OPA PDP -->
+                <g class="topo-node" id="nodeOpa" onclick="window.selectTopoNode('opa')" style="cursor: pointer;">
+                  <rect x="35" y="28" width="170" height="46" rx="3" fill="#f4f6fa" stroke="#9eb5d2" stroke-width="1.25"/>
+                  <text x="120" y="47" text-anchor="middle" fill="#191c21" font-size="11.5" font-weight="700" font-family="'Inter', sans-serif">OPA POLICY ENGINE</text>
+                  <text x="120" y="63" text-anchor="middle" fill="#565d6c" font-size="9" font-family="'Inter', sans-serif">Decision Point (PDP)</text>
                 </g>
 
-                <!-- OPA PDP & Vault -->
-                <g class="topo-node" id="nodeOpa" onclick="window.selectTopoNode('opa')">
-                  <rect x="250" y="140" width="125" height="34" rx="5" fill="#1e293b" stroke="#38bdf8" stroke-width="1"/>
-                  <text x="268" y="162" fill="#e2e8f0" font-size="11" font-weight="600">OPA PDP</text>
-                </g>
-                <g class="topo-node" id="nodeVault" onclick="window.selectTopoNode('vault')">
-                  <rect x="385" y="140" width="125" height="34" rx="5" fill="#1e293b" stroke="#eab308" stroke-width="1"/>
-                  <text x="405" y="162" fill="#fef08a" font-size="11" font-weight="600">VAULT TOKENS</text>
+                <!-- Broker -->
+                <g class="topo-node" id="nodeBroker" onclick="window.selectTopoNode('broker')" style="cursor: pointer;">
+                  <rect x="255" y="24" width="210" height="54" rx="3" fill="#1f3a60" stroke="#142640" stroke-width="1.5"/>
+                  <text x="360" y="46" text-anchor="middle" fill="#ffffff" font-size="12" font-weight="700" font-family="'Inter', sans-serif">BROKER / ORCHESTRATOR</text>
+                  <text x="360" y="63" text-anchor="middle" fill="#d9e6f5" font-size="9.5" font-family="'Inter', sans-serif">Mandatory Mediation PEP</text>
                 </g>
 
-                <!-- Tenant Nodes (Kata MicroVMs) -->
-                <!-- RED SANDBOX -->
-                <g class="topo-node" id="nodeRed" onclick="window.selectTopoNode('red')">
-                  <rect x="40" y="240" width="190" height="95" rx="8" fill="url(#redGrad)" stroke="#f87171" stroke-width="1.5"/>
-                  <text x="55" y="265" fill="#fee2e2" font-size="13" font-weight="700">RED SANDBOX</text>
-                  <text x="55" y="285" fill="#fca5a5" font-size="10" font-family="'Fira Code'">Runtime: Kata microVM</text>
-                  <text x="55" y="302" fill="#fca5a5" font-size="10" font-family="'Fira Code'">cgroup: cpuset:0-3 (Node-A)</text>
-                  <text x="55" y="320" fill="#fca5a5" font-size="10" font-family="'Fira Code'">Egress: Broker Only (mTLS)</text>
+                <!-- Vault Authority -->
+                <g class="topo-node" id="nodeVault" onclick="window.selectTopoNode('vault')" style="cursor: pointer;">
+                  <rect x="515" y="28" width="170" height="46" rx="3" fill="#fdfaf5" stroke="#dfb987" stroke-width="1.25"/>
+                  <text x="600" y="47" text-anchor="middle" fill="#191c21" font-size="11.5" font-weight="700" font-family="'Inter', sans-serif">VAULT AUTHORITY</text>
+                  <text x="600" y="63" text-anchor="middle" fill="#565d6c" font-size="9" font-family="'Inter', sans-serif">Capability Token Leases</text>
                 </g>
 
-                <!-- MODEL INFERENCE WORKER -->
-                <g class="topo-node" id="nodeModel" onclick="window.selectTopoNode('model')">
-                  <rect x="285" y="240" width="190" height="95" rx="8" fill="url(#purpleGrad)" stroke="#a78bfa" stroke-width="1.5"/>
-                  <text x="300" y="265" fill="#ede9fe" font-size="13" font-weight="700">DEDICATED MODEL</text>
-                  <text x="300" y="285" fill="#c4b5fd" font-size="10" font-family="'Fira Code'">Dedicated per session</text>
-                  <text x="300" y="302" fill="#c4b5fd" font-size="10" font-family="'Fira Code'">Cold KV-Cache & Canary</text>
-                  <text x="300" y="320" fill="#f87171" font-size="10" font-family="'Fira Code'">Egress: DENY ALL (Zero-Net)</text>
+                <!-- Workloads: Red, Dedicated Model, Blue -->
+                <!-- Red Sandbox -->
+                <g class="topo-node" id="nodeRed" onclick="window.selectTopoNode('red')" style="cursor: pointer;">
+                  <rect x="35" y="145" width="170" height="50" rx="3" fill="#fdf5f5" stroke="#a42323" stroke-width="1.5"/>
+                  <text x="120" y="166" text-anchor="middle" fill="#731818" font-size="12" font-weight="700" font-family="'Inter', sans-serif">RED SANDBOX</text>
+                  <text x="120" y="182" text-anchor="middle" fill="#8f2d2d" font-size="9" font-family="'Inter', sans-serif">worker_thread (Kata target)</text>
                 </g>
 
-                <!-- BLUE SANDBOX -->
-                <g class="topo-node" id="nodeBlue" onclick="window.selectTopoNode('blue')">
-                  <rect x="530" y="240" width="190" height="95" rx="8" fill="url(#blueGrad)" stroke="#60a5fa" stroke-width="1.5"/>
-                  <text x="545" y="265" fill="#dbeafe" font-size="13" font-weight="700">BLUE SANDBOX</text>
-                  <text x="545" y="285" fill="#93c5fd" font-size="10" font-family="'Fira Code'">Runtime: Kata microVM</text>
-                  <text x="545" y="302" fill="#93c5fd" font-size="10" font-family="'Fira Code'">cgroup: cpuset:4-7 (Node-B)</text>
-                  <text x="545" y="320" fill="#93c5fd" font-size="10" font-family="'Fira Code'">Egress: Broker Only (mTLS)</text>
+                <!-- Dedicated Model (No overlapping elements, single clear label) -->
+                <g class="topo-node" id="nodeModel" onclick="window.selectTopoNode('model')" style="cursor: pointer;">
+                  <rect x="260" y="145" width="200" height="50" rx="3" fill="#f8f5fb" stroke="#5a4574" stroke-width="1.5"/>
+                  <text x="360" y="166" text-anchor="middle" fill="#332244" font-size="12" font-weight="700" font-family="'Inter', sans-serif">DEDICATED MODEL</text>
+                  <text x="360" y="182" text-anchor="middle" fill="#4d3663" font-size="9" font-family="'Inter', sans-serif">Isolated Worker (Ephemeral)</text>
                 </g>
 
-                <!-- WORM AUDIT STORE -->
-                <g class="topo-node" id="nodeAudit" onclick="window.selectTopoNode('audit')">
-                  <rect x="180" y="390" width="400" height="55" rx="8" fill="url(#greenGrad)" stroke="#34d399" stroke-width="1.5"/>
-                  <text x="210" y="416" fill="#ecfdf5" font-size="13" font-weight="700">WORM AUDIT & PROVENANCE STORE</text>
-                  <text x="210" y="433" fill="#a7f3d0" font-size="10" font-family="'Fira Code'">SHA-256 Hash Chained | Merkle Root Anchored | Write-Only for Tenants</text>
+                <!-- Blue Sandbox -->
+                <g class="topo-node" id="nodeBlue" onclick="window.selectTopoNode('blue')" style="cursor: pointer;">
+                  <rect x="515" y="145" width="170" height="50" rx="3" fill="#f0f5fa" stroke="#1d4872" stroke-width="1.5"/>
+                  <text x="600" y="166" text-anchor="middle" fill="#102e4d" font-size="12" font-weight="700" font-family="'Inter', sans-serif">BLUE SANDBOX</text>
+                  <text x="600" y="182" text-anchor="middle" fill="#204b77" font-size="9" font-family="'Inter', sans-serif">worker_thread (Kata target)</text>
+                </g>
+
+                <!-- WORM Audit Store -->
+                <g class="topo-node" id="nodeAudit" onclick="window.selectTopoNode('audit')" style="cursor: pointer;">
+                  <rect x="160" y="295" width="400" height="48" rx="3" fill="#f1f8f3" stroke="#1b663e" stroke-width="1.5"/>
+                  <text x="360" y="316" text-anchor="middle" fill="#0f3d24" font-size="12" font-weight="700" font-family="'Inter', sans-serif">WORM AUDIT &amp; PROVENANCE LEDGER</text>
+                  <text x="360" y="331" text-anchor="middle" fill="#1e5c38" font-size="9" font-family="'Inter', sans-serif">SHA-256 Hash Chain • Merkle Root Anchoring</text>
                 </g>
 
                 <!-- CONNECTORS -->
-                <!-- Red -> Broker -->
-                <path d="M 135 240 L 135 110 L 250 110" fill="none" stroke="#22d3ee" stroke-width="2" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+                <!-- OPA <-> Broker -->
+                <path d="M 205 51 L 255 51" stroke="#9eb5d2" stroke-width="1.5" stroke-dasharray="3,2" marker-end="url(#arrow)"/>
+                <!-- Broker <-> Vault -->
+                <path d="M 465 51 L 515 51" stroke="#dfb987" stroke-width="1.5" stroke-dasharray="3,2" marker-end="url(#arrow)"/>
+
+                <!-- Red -> Broker (mTLS) -->
+                <path d="M 120 145 L 120 70 L 255 70" fill="none" stroke="#1f3a60" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+                <text x="126" y="110" fill="#565d6c" font-size="8.5" font-family="'Inter', sans-serif">mTLS</text>
+
                 <!-- Broker -> Model -->
-                <path d="M 380 132 L 380 240" fill="none" stroke="#a78bfa" stroke-width="2" marker-end="url(#arrow)"/>
-                <!-- Blue -> Broker -->
-                <path d="M 625 240 L 625 110 L 510 110" fill="none" stroke="#60a5fa" stroke-width="2" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+                <path d="M 360 78 L 360 145" fill="none" stroke="#5a4574" stroke-width="1.75" marker-end="url(#arrow)"/>
+
+                <!-- Blue -> Broker (mTLS) -->
+                <path d="M 600 145 L 600 70 L 465 70" fill="none" stroke="#1d4872" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+                <text x="562" y="110" fill="#565d6c" font-size="8.5" font-family="'Inter', sans-serif">mTLS</text>
 
                 <!-- Red -> Audit (Write-only) -->
-                <path d="M 135 335 L 135 415 L 180 415" fill="none" stroke="#10b981" stroke-width="1.5" stroke-dasharray="2,2" marker-end="url(#arrow-green)"/>
-                <!-- Blue -> Audit (Write-only) -->
-                <path d="M 625 335 L 625 415 L 580 415" fill="none" stroke="#10b981" stroke-width="1.5" stroke-dasharray="2,2" marker-end="url(#arrow-green)"/>
+                <path d="M 120 195 L 120 319 L 160 319" fill="none" stroke="#1b663e" stroke-width="1.5" stroke-dasharray="3,2" marker-end="url(#arrow-green)"/>
                 <!-- Model -> Audit -->
-                <path d="M 380 335 L 380 390" fill="none" stroke="#10b981" stroke-width="1.5" stroke-dasharray="2,2" marker-end="url(#arrow-green)"/>
+                <path d="M 360 195 L 360 295" fill="none" stroke="#1b663e" stroke-width="1.5" stroke-dasharray="3,2" marker-end="url(#arrow-green)"/>
+                <!-- Blue -> Audit -->
+                <path d="M 600 195 L 600 319 L 560 319" fill="none" stroke="#1b663e" stroke-width="1.5" stroke-dasharray="3,2" marker-end="url(#arrow-green)"/>
 
-                <!-- DENIED Direct Channel Red <-> Blue (Blocked) -->
-                <path d="M 230 285 L 530 285" fill="none" stroke="#ef4444" stroke-width="2" stroke-dasharray="5,5"/>
-                <circle cx="380" cy="285" r="14" fill="#7f1d1d" stroke="#ef4444" stroke-width="1.5"/>
-                <text x="375" y="290" fill="#fee2e2" font-size="14" font-weight="900">✕</text>
-                <text x="310" y="305" fill="#fca5a5" font-size="9" font-family="'Fira Code'">DIRECT P2P BLOCKED</text>
+                <!-- DIRECT P2P BLOCKED RED <-> BLUE (Routed through y=238 in clear space with zero overlap) -->
+                <path d="M 205 170 L 235 170 L 235 238 L 485 238 L 485 170 L 515 170" fill="none" stroke="#a42323" stroke-width="1.25" stroke-dasharray="4,3"/>
+                <g transform="translate(285, 226)">
+                  <rect x="0" y="0" width="150" height="24" rx="2" fill="#fdf2f2" stroke="#e6a5a5" stroke-width="1"/>
+                  <text x="75" y="16" text-anchor="middle" fill="#a42323" font-size="9" font-weight="700" font-family="'Inter', sans-serif">⛔ DIRECT P2P BLOCKED</text>
+                </g>
               </svg>
             </div>
           </div>
         </div>
 
-        <!-- Node Inspector Panel -->
+        <!-- Node Inspector Panel (Right Column) -->
         <div class="panel glass-card">
           <div class="panel-header">
             <h3 id="inspectorTitle">Component Inspector: Broker</h3>
             <span class="badge-role" id="inspectorBadge">Core Orchestrator</span>
           </div>
           <div class="panel-body" id="inspectorContent">
-            <!-- Dynamically populated by JS -->
+            <!-- Dynamically populated by JS with live state & plain-language jargon gloss -->
+          </div>
+        </div>
+      </div>
+
+      <!-- Integrated Sub-Section: Side-Channel & Telemetry Guard (§G, §N) -->
+      <div class="panel glass-card" style="margin-top: 1.5rem;" id="secSidechannel">
+        <div class="panel-header">
+          <div>
+            <h3>Side-Channel & Telemetry Guard (§G, §N)</h3>
+            <p class="desc-text">Hardware isolation mitigations: 250ms response quantization and tenant-isolated metric namespaces.</p>
+          </div>
+          <span class="tag-accent">Quantized &bull; Isolated Namespaces</span>
+        </div>
+        <div class="panel-body">
+          <div class="pane-grid-2">
+            <div>
+              <h4 style="margin-bottom:0.4rem; color:var(--ink-primary);">Timing Quantization Simulator (§G.1)</h4>
+              <p class="desc-text">
+                Enter any raw request duration to verify how the broker side-channel quantizer rounds variable inference latencies into uniform 250ms buckets, preventing token length leakage.
+              </p>
+              <div class="quantizer-tool">
+                <label>Raw Request Duration (ms):</label>
+                <div class="input-inline">
+                  <input type="number" id="numRawLatency" value="142" class="input-field" min="1" max="5000">
+                  <button class="btn btn-primary" id="btnCalculateBucket">Quantize</button>
+                </div>
+                <div class="quantizer-result">
+                  <div class="q-box">
+                    <span class="q-label">Raw Response Time:</span>
+                    <span class="q-val mono" id="lblRawVal">142 ms</span>
+                  </div>
+                  <div class="q-arrow">➔</div>
+                  <div class="q-box highlight">
+                    <span class="q-label">Cross-Tenant Visible Bucket:</span>
+                    <span class="q-val mono" style="color:var(--protocol-navy);" id="lblQuantizedVal">250 ms</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="latency-comparison-chart" style="margin-top: 1.25rem;">
+                <h5 style="color:var(--ink-secondary); margin-bottom:0.5rem;">Bucket Distribution Preview:</h5>
+                <div class="chart-bars" id="quantizerChart">
+                  <div class="bar-col"><div class="bar-fill" style="height: 30%;"></div><span>42ms ➔ 250ms</span></div>
+                  <div class="bar-col"><div class="bar-fill" style="height: 50%;"></div><span>135ms ➔ 250ms</span></div>
+                  <div class="bar-col"><div class="bar-fill" style="height: 70%;"></div><span>380ms ➔ 500ms</span></div>
+                  <div class="bar-col"><div class="bar-fill" style="height: 90%;"></div><span>512ms ➔ 750ms</span></div>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <h4 style="margin-bottom:0.4rem; color:var(--ink-primary);">Tenant-Scoped Telemetry Isolation (§N)</h4>
+              <p class="desc-text">
+                Metrics are bucketed into 10% ranges and strictly isolated by tenant namespace. Red cannot observe Blue micro-spikes.
+              </p>
+              <div class="telemetry-views">
+                <div class="telem-box">
+                  <div class="telem-header red">
+                    <span>RED SANDBOX METRICS</span>
+                    <span class="mono">namespace: bayora-tenant-red</span>
+                  </div>
+                  <div class="telem-content" id="metricsRed">
+                    <div>CPU Usage Band: <strong class="mono">40% - 50%</strong></div>
+                    <div>Memory Band: <strong class="mono">60% - 70%</strong></div>
+                    <div>Node: <strong class="mono">node-worker-alpha-kata (cpuset:0-3)</strong></div>
+                    <div class="text-muted">Visible peers: [None - Isolated]</div>
+                  </div>
+                </div>
+
+                <div class="telem-box" style="margin-top: 0.75rem;">
+                  <div class="telem-header blue">
+                    <span>BLUE SANDBOX METRICS</span>
+                    <span class="mono">namespace: bayora-tenant-blue</span>
+                  </div>
+                  <div class="telem-content" id="metricsBlue">
+                    <div>CPU Usage Band: <strong class="mono">30% - 40%</strong></div>
+                    <div>Memory Band: <strong class="mono">50% - 60%</strong></div>
+                    <div>Node: <strong class="mono">node-worker-beta-kata (cpuset:4-7)</strong></div>
+                    <div class="text-muted">Visible peers: [None - Isolated]</div>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -566,7 +620,7 @@
       <div class="panel glass-card">
         <div class="panel-header">
           <div>
-            <h2>WORM Cryptographic Audit & Provenance Store (§M)</h2>
+            <h2>WORM Cryptographic Audit &amp; Provenance Store (§M)</h2>
             <p class="desc-text">SHA-256 Hash Chained Blocks with Merkle Tree Anchoring. Tenants are Write-Only.</p>
           </div>
           <div class="audit-actions">
@@ -595,100 +649,14 @@
       </div>
     </section>
 
-    <!-- TAB 5: SIDE-CHANNEL & TELEMETRY GUARD (§G, §N) -->
-    <section class="tab-pane" id="tab-sidechannel">
-      <div class="pane-grid-2">
-        <div class="panel glass-card">
-          <div class="panel-header">
-            <h3>Timing Quantization Simulator (§G.1)</h3>
-            <span class="tag-accent">250ms Buckets</span>
-          </div>
-          <div class="panel-body">
-            <p class="desc-text">
-              Enter any raw response duration to see how the side-channel quantizer collapses variable response latencies into uniform 250ms buckets, preventing payload complexity leakage.
-            </p>
-
-            <div class="quantizer-tool">
-              <label>Raw Request Duration (ms):</label>
-              <div class="input-inline">
-                <input type="number" id="numRawLatency" value="142" class="input-field" min="1" max="5000">
-                <button class="btn btn-primary" id="btnCalculateBucket">Quantize</button>
-              </div>
-
-              <div class="quantizer-result">
-                <div class="q-box">
-                  <span class="q-label">Raw Response Time:</span>
-                  <span class="q-val mono" id="lblRawVal">142 ms</span>
-                </div>
-                <div class="q-arrow">➔</div>
-                <div class="q-box highlight">
-                  <span class="q-label">Cross-Tenant Visible Bucket:</span>
-                  <span class="q-val mono cyan" id="lblQuantizedVal">250 ms</span>
-                </div>
-              </div>
-            </div>
-
-            <div class="latency-comparison-chart" style="margin-top: 1.5rem;">
-              <h4>Bucket Distribution Preview:</h4>
-              <div class="chart-bars" id="quantizerChart">
-                <div class="bar-col"><div class="bar-fill" style="height: 30%;"></div><span>42ms ➔ 250ms</span></div>
-                <div class="bar-col"><div class="bar-fill" style="height: 50%;"></div><span>135ms ➔ 250ms</span></div>
-                <div class="bar-col"><div class="bar-fill" style="height: 70%;"></div><span>380ms ➔ 500ms</span></div>
-                <div class="bar-col"><div class="bar-fill" style="height: 90%;"></div><span>512ms ➔ 750ms</span></div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="panel glass-card">
-          <div class="panel-header">
-            <h3>Tenant-Scoped Telemetry Isolation (§N)</h3>
-            <span class="tag-accent">Per-Tenant Namespaces</span>
-          </div>
-          <div class="panel-body">
-            <p class="desc-text">
-              Demonstrates that metrics are bucketed into 10% ranges and strictly isolated by tenant namespace. Red cannot observe Blue's micro-spikes.
-            </p>
-
-            <div class="telemetry-views">
-              <div class="telem-box">
-                <div class="telem-header red">
-                  <span>RED SANDBOX METRICS</span>
-                  <span class="mono">namespace: bayora-tenant-red</span>
-                </div>
-                <div class="telem-content" id="metricsRed">
-                  <div>CPU Usage Band: <strong class="mono">40% - 50%</strong></div>
-                  <div>Memory Band: <strong class="mono">60% - 70%</strong></div>
-                  <div>Node: <strong class="mono">node-worker-alpha-kata (cpuset:0-3)</strong></div>
-                  <div class="text-muted">Visible peers: [None - Isolated]</div>
-                </div>
-              </div>
-
-              <div class="telem-box" style="margin-top: 1rem;">
-                <div class="telem-header blue">
-                  <span>BLUE SANDBOX METRICS</span>
-                  <span class="mono">namespace: bayora-tenant-blue</span>
-                </div>
-                <div class="telem-content" id="metricsBlue">
-                  <div>CPU Usage Band: <strong class="mono">30% - 40%</strong></div>
-                  <div>Memory Band: <strong class="mono">50% - 60%</strong></div>
-                  <div>Node: <strong class="mono">node-worker-beta-kata (cpuset:4-7)</strong></div>
-                  <div class="text-muted">Visible peers: [None - Isolated]</div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- TAB 6: POC DEMONSTRATION SUITE (§S) -->
-    <section class="tab-pane" id="tab-checklist">
+    <!-- TAB 5: POC DEMONSTRATION SUITE & DATASETS (§S & BENCHMARKS) -->
+    <section class="tab-pane" id="tab-verification">
+      <!-- Section S: 9 PoC Demonstration Claims -->
       <div class="panel glass-card">
         <div class="panel-header">
           <div>
-            <h2>Section S: 9 PoC Demonstration Claims & Live Verification</h2>
-            <p class="desc-text">Every claim from the review document has a corresponding test that is executed live.</p>
+            <h2>Section S: 9 PoC Demonstration Claims &amp; Live Verification</h2>
+            <p class="desc-text">Every claim from the review document has a corresponding test executed live against policy boundaries.</p>
           </div>
           <button class="btn btn-primary" id="btnRunPocTests">▶ Run All 9 PoC Tests</button>
         </div>
@@ -710,14 +678,12 @@
           </table>
         </div>
       </div>
-    </section>
 
-    <!-- TAB 7: DATASETS & BENCHMARKS HUB (8 SOURCES) -->
-    <section class="tab-pane" id="tab-datasets">
-      <div class="panel glass-card">
+      <!-- Official Benchmark Datasets Hub (8 Integrated Sources) -->
+      <div class="panel glass-card" style="margin-top: 1.5rem;">
         <div class="panel-header">
           <div>
-            <h2>Official Benchmark Datasets & Security Resources (8 Integrated)</h2>
+            <h2>Official Benchmark Datasets &amp; Security Resources (8 Integrated)</h2>
             <p class="desc-text">Live integrated datasets from leading AI safety, adversarial red-teaming, and system provenance repositories.</p>
           </div>
           <span class="tag-accent" id="datasetCountBadge">8 Datasets Verified</span>
@@ -736,14 +702,14 @@
             </div>
             <div class="card-body">
               <div class="key-value-list">
-                <div class="kv-item"><span class="k">Repository URL:</span> <a href="#" target="_blank" class="v mono cyan" id="datasetInspectorUrl">https://github.com/llm-attacks/llm-attacks</a></div>
+                <div class="kv-item"><span class="k">Repository URL:</span> <a href="#" target="_blank" class="v mono" style="color:var(--protocol-navy);" id="datasetInspectorUrl">https://github.com/llm-attacks/llm-attacks</a></div>
                 <div class="kv-item"><span class="k">Cryptographic Snapshot Hash:</span> <span class="v mono" id="datasetInspectorHash">sha256_advbench_v1_d83e29f8c0a9</span></div>
                 <div class="kv-item"><span class="k">Access Status:</span> <span class="v green" id="datasetInspectorStatus">ACTIVE_ONLINE</span></div>
                 <div class="kv-item"><span class="k">Description:</span> <span class="v" id="datasetInspectorDesc">Standard collection of harmful behaviors and affirmative prefix steering targets.</span></div>
               </div>
 
               <div style="margin-top: 1.25rem;">
-                <h5 style="margin-bottom: 0.6rem; color: #94a3b8;">Standardized Test Samples:</h5>
+                <h5 style="margin-bottom: 0.6rem; color: var(--ink-secondary);">Standardized Test Samples:</h5>
                 <div id="datasetSamplesList" style="display: flex; flex-direction: column; gap: 0.6rem;">
                   <!-- Dynamically populated -->
                 </div>
@@ -758,7 +724,7 @@
 
   <footer class="app-footer">
     <div>Bayora Secure AI Safety Testing Platform &bull; Built for Hack in hILL</div>
-    <div class="mono" style="font-size: 0.8rem; color: #64748b;">Hash Chain: SHA-256 &bull; Runtime: Kata microVM &bull; PDP: OPA &bull; Vault Leases</div>
+    <div class="mono" style="font-size: 0.8rem; color: #64748b;">Hash Chain: SHA-256 &bull; Runtime: worker_threads (Kata Target) &bull; PDP: OPA &bull; Vault Leases</div>
   </footer>
 
   <script src="js/app.js"></script>

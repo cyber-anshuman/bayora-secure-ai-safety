@@ -17,6 +17,8 @@ const benchmarkRegistry = require('./datasets/benchmark_registry');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const HOST = process.env.HOST || '0.0.0.0';
+const NODE_ENV = process.env.NODE_ENV || 'development';
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, '../public')));
@@ -49,13 +51,14 @@ app.get('/api/status', (req, res) => {
   res.json({
     status: 'HEALTHY',
     version: '2.0.0-redteam-redesign',
-    isolationTier: 'Kata Containers microVM (Hardware-virtualized)',
+    isolationTier: 'Kata Containers microVM (Target Architecture — modeled in PoC)',
     mandatoryMediation: 'ENABLED',
     activeSessions: broker.sessions.size,
     auditChainLength: auditStore.chain.length,
     auditChainValid: auditReport.isValid,
     latestMerkleRoot: auditStore.getMerkleRoot(),
-    cniPolicy: 'Cilium eBPF Default-Deny',
+    cniPolicy: 'Cilium eBPF Default-Deny (Target Architecture — modeled in PoC)',
+    runtimeIsolation: 'Node.js worker_threads with V8 resourceLimits (Enforced in PoC)',
     nodeAntiAffinity: {
       red: sideChannelMitigations.getIsolatedNodeAssignment('red'),
       blue: sideChannelMitigations.getIsolatedNodeAssignment('blue'),
@@ -216,6 +219,7 @@ app.get('/api/poc-tests', async (req, res) => {
   }
 });
 
+
 // Run all 7 Attack Simulations
 app.get('/api/attack-sims', async (req, res) => {
   try {
@@ -309,10 +313,10 @@ app.get('/api/datasets/:id', (req, res) => {
   res.json(dataset);
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, HOST, () => {
   console.log(`================================================================`);
   console.log(` BAYORA SECURE AI SAFETY TESTING PLATFORM (v2.0 Redesign)`);
-  console.log(` Server active on http://localhost:${PORT}`);
+  console.log(` Server active on http://${HOST}:${PORT} (${NODE_ENV})`);
   console.log(` Implementation of: bayora-redteam-review.md`);
   console.log(`================================================================`);
 });

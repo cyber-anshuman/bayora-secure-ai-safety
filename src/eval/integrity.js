@@ -6,9 +6,10 @@
 
 class EvaluationIntegrityEngine {
   constructor() {
-    this.expectedModelHash = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+    this.expectedModelHash = process.env.MODEL_WEIGHT_PIN_HASH || 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
     this.expectedConfigHash = 'cfg_a1b2c3d4e5f6';
     this.expectedDatasetHash = 'data_advbench_v1_hash';
+    this.maxCanaryProbes = Number(process.env.MAX_CANARY_PROBES_PER_CYCLE) || 4;
   }
 
   /**

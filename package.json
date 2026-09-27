@@ -6,8 +6,11 @@
   "scripts": {
     "start": "node src/server.js",
     "test": "node test/poc_tests.js",
+    "test:unit": "node test/weight_integrity.test.js && node test/subsystems_unit.test.js",
+    "test:isolation": "node test/worker_isolation.test.js",
     "test:attacks": "node test/attack_sim_tests.js",
-    "test:all": "node test/poc_tests.js && node test/attack_sim_tests.js"
+    "test:all": "node test/poc_tests.js && node test/weight_integrity.test.js && node test/subsystems_unit.test.js && node test/worker_isolation.test.js && node test/attack_sim_tests.js",
+    "test:coverage": "c8 npm run test:all"
   },
   "keywords": [
     "ai-safety",
@@ -22,16 +25,19 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/bayora-redteam/bayora-secure-ai-safety.git"
+    "url": "git+https://github.com/cyber-anshuman/bayora-secure-ai-safety.git"
   },
   "bugs": {
-    "url": "https://github.com/bayora-redteam/bayora-secure-ai-safety/issues"
+    "url": "https://github.com/cyber-anshuman/bayora-secure-ai-safety/issues"
   },
-  "homepage": "https://github.com/bayora-redteam/bayora-secure-ai-safety#readme",
+  "homepage": "https://github.com/cyber-anshuman/bayora-secure-ai-safety#readme",
   "engines": {
     "node": ">=18.0.0"
   },
   "dependencies": {
     "express": "^4.19.2"
+  },
+  "devDependencies": {
+    "c8": "^12.0.0"
   }
 }

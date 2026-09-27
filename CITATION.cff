@@ -5,8 +5,7 @@ abstract: "A reference implementation and formal verification platform for isola
 version: 1.0.0
 date-released: 2026-09-27
 authors:
-  - family-names: "Red Team & Architecture Working Group"
-    given-names: "Bayora"
+  - name: "Anshuman"
 keywords:
   - "ai-safety"
   - "adversarial-testing"
@@ -16,4 +15,4 @@ keywords:
   - "merkle-tree"
   - "ebpf"
 license: "Apache-2.0"
-repository-code: "https://github.com/bayora-redteam/bayora-secure-ai-safety"
+repository-code: "https://github.com/cyber-anshuman/bayora-secure-ai-safety"

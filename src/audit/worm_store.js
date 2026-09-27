@@ -11,7 +11,24 @@ class WormAuditStore {
     this.chain = [];
     this.anchors = []; // Merkle roots anchored externally
     this.genesisHash = '0000000000000000000000000000000000000000000000000000000000000000';
+    this.storagePath = process.env.WORM_STORAGE_PATH || null;
+    this.externalAnchorServiceEnabled = process.env.EXTERNAL_ANCHOR_SERVICE_ENABLED !== 'false';
+    this.externalAnchorIntervalSec = Number(process.env.EXTERNAL_ANCHOR_INTERVAL_SEC) || 60;
     this._initializeGenesis();
+  }
+
+  _persistEntry(entry) {
+    if (this.storagePath) {
+      try {
+        const fs = require('fs');
+        const path = require('path');
+        const dir = path.dirname(this.storagePath);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.appendFileSync(this.storagePath, JSON.stringify(entry) + '\n', 'utf8');
+      } catch (err) {
+        // Safe fall-through for memory-only or restricted environments
+      }
+    }
   }
 
   _initializeGenesis() {
@@ -28,6 +45,7 @@ class WormAuditStore {
     };
     genesisEntry.entryHash = this._calculateEntryHash(genesisEntry);
     this.chain.push(genesisEntry);
+    this._persistEntry(genesisEntry);
     this.publishMerkleAnchor();
   }
 
@@ -66,6 +84,7 @@ class WormAuditStore {
 
     entry.entryHash = this._calculateEntryHash(entry);
     this.chain.push(entry);
+    this._persistEntry(entry);
 
     // Anchor every 5 entries or on critical state changes
     if (this.chain.length % 5 === 0 || eventData.eventType === 'CONCLUDE') {
@@ -117,11 +136,15 @@ class WormAuditStore {
    * Publish an external anchor (simulates Sigstore/Rekor public transparency log)
    */
   publishMerkleAnchor() {
+    if (!this.externalAnchorServiceEnabled) {
+      return null;
+    }
     const root = this.getMerkleRoot();
     const anchor = {
       blockCount: this.chain.length,
       merkleRoot: root,
       timestamp: new Date().toISOString(),
+      anchorIntervalSec: this.externalAnchorIntervalSec,
       anchorSignature: crypto.createHmac('sha256', 'BAYORA_ANCHOR_SECRET').update(root).digest('hex')
     };
     this.anchors.push(anchor);
