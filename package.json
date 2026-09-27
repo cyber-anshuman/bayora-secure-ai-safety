@@ -10,7 +10,7 @@
     "test:isolation": "node test/worker_isolation.test.js",
     "test:attacks": "node test/attack_sim_tests.js",
     "test:all": "node test/poc_tests.js && node test/weight_integrity.test.js && node test/subsystems_unit.test.js && node test/worker_isolation.test.js && node test/attack_sim_tests.js",
-    "test:coverage": "c8 npm run test:all"
+    "test:coverage": "nyc --reporter=text --reporter=lcov npm run test:all"
   },
   "keywords": [
     "ai-safety",
@@ -38,6 +38,6 @@
     "express": "^4.19.2"
   },
   "devDependencies": {
-    "c8": "^12.0.0"
+    "nyc": "^18.0.0"
   }
 }

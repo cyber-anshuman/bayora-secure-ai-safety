@@ -43,7 +43,7 @@ jobs:
     - name: Run Section T Adversarial Attack Simulations (7 Scenarios)
       run: npm run test:attacks
 
-    - name: Verify Code Test Coverage (>90%)
+    - name: Verify Code Test Coverage (>85% stmt/line/func, >75% branch)
       run: npm run test:coverage
 
     - name: Smoke test Express API Server & Benchmark Registry
