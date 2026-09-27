@@ -13,7 +13,7 @@
 
 [![CI](https://github.com/cyber-anshuman/bayora-secure-ai-safety/actions/workflows/ci.yml/badge.svg)](https://github.com/cyber-anshuman/bayora-secure-ai-safety/actions)
 [![CodeQL](https://github.com/cyber-anshuman/bayora-secure-ai-safety/actions/workflows/codeql.yml/badge.svg)](https://github.com/cyber-anshuman/bayora-secure-ai-safety/actions)
-[![Coverage](https://img.shields.io/badge/Coverage-94.73%25_Lines-brightgreen.svg)](#4-test-coverage--ci-hardening)
+[![Coverage](https://img.shields.io/badge/Coverage-91.57%25_Stmt_%7C_87%25_Branch-brightgreen.svg)](#4-test-coverage--ci-hardening)
 [![Runtime Isolation](https://img.shields.io/badge/Runtime_Isolation-Enforced-blue.svg)](#3-real-runtime-isolation-unit-tests-section-h-partial)
 [![SBOM](https://img.shields.io/badge/SBOM-CycloneDX_JSON-informational.svg)](sbom.json)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
@@ -223,22 +223,15 @@ Bayora integrates 8 leading AI safety, adversarial red-teaming, and forensic pro
 
 The platform includes a futuristic cybersecurity command center accessible at `http://localhost:3000`:
 
-| Architecture & Trust Topology (§E, §Q) | 7 Adversarial Attack Simulations (§T) |
-| :---: | :---: |
-| ![Architecture Topology](assets/demo_topology.png) | ![Attack Simulation Lab](assets/demo_attacks.png) |
-| *Interactive SVG topology showing Kata microVMs, Cilium filters, and OPA PDP* | *Real-time packet logs verifying mitigation of all 7 adversarial exploits* |
+| Tab | What you see |
+|-----|-------------|
+| **Architecture & Trust Topology (§E, §Q)** | Interactive SVG topology showing V8 worker-thread isolation (enforced) + Kata microVM / Cilium eBPF target annotations, live component inspector, jargon tooltips |
+| **Live Session Runner** | Step-by-step 7-phase state machine stepper with real-time Evaluation Integrity badges and disclosure bundle viewer |
+| **Adversarial Attack Simulation Lab (§T)** | 1-click execution of all 7 adversarial attack vectors with animated terminal packet logs |
+| **WORM Audit Explorer & Tamper Simulator (§M)** | SHA-256 block explorer — interactive **"Inject Malicious Tamper"** button breaks the hash chain visually and fires a Merkle root divergence alarm |
+| **Datasets & Benchmarks Hub** | Full inspection of 8 benchmark suites with 1-click prompt loading into the session runner |
 
-| WORM Audit Store & Tamper Detector (§M) | Integrated Benchmark Datasets Hub |
-| :---: | :---: |
-| ![WORM Audit Explorer](assets/demo_audit.png) | ![Datasets Hub](assets/demo_datasets.png) |
-| *Cryptographic SHA-256 hash chaining, Merkle root tree & live tamper alarm* | *8 standard benchmarks (AdvBench, JBB, HarmBench, ToxiGen, Lakera, etc.)* |
 
-### Key Dashboard Capabilities:
-- **Interactive Topology Inspector (§E, §Q)**: SVG diagram of Kata microVM containers, eBPF filters, and control-plane components. Click any node to view active cgroups, dropped capabilities, and active policies.
-- **Live 7-Phase Session Runner**: Step-by-step or auto-run state stepper with real-time Evaluation Integrity badges and disclosure bundle views.
-- **Adversarial Attack Simulation Lab (§T)**: 1-click execution of the 7 adversarial attack vectors with live animated terminal packet logs.
-- **WORM Audit Explorer & Tamper Simulator (§M)**: Real-time SHA-256 block explorer. Includes an interactive **"Inject Malicious Tamper"** button to modify past blocks and visually verify hash chain breakage and Merkle root divergence.
-- **Datasets & Benchmarks Hub**: Full inspection of the 8 integrated benchmark suites with 1-click prompt loading into the session runner.
 
 ---
 
@@ -297,19 +290,31 @@ Running Real Runtime Isolation Unit Tests (worker_threads, Section H partial)...
 ✓ Check 2 passed: Blue evaluateDefense correctly classifies adversarial vs benign in worker.
 ✓ Check 3 passed: Cross-tenant memory isolation confirmed (no global leak, distinct secret fingerprints).
 ✓ Check 4 passed: Oversized heap allocation was rejected by V8 resourceLimits (Worker terminated due to reaching memory limit: JS heap out of memory).
+✓ Check 5 passed: Worker structured error response on unknown task type verified.
+✓ Check 6 passed: Worker structured error response on malformed task payload verified.
+✓ Check 7 passed: Valid allocation completes within normal resource limits.
+✓ Check 8 passed: Worker async promise resolution verified.
+✓ Check 9 passed: Worker async promise rejection caught and verified.
 
 All worker isolation unit tests passed cleanly!
 ```
 
-### 4. Test Coverage & CI Hardening
+### 4. Subsystems & Branch Coverage Unit Tests
+```bash
+npm run test:unit
+```
+10 test sections exercising all subsystem guardrails: VaultAuthority, SideChannelMitigations, BrokerStateMachine, EvaluationIntegrityEngine, WormAuditStore, DedicatedInferenceWorker, OpaPolicyEngine, VaultAuthority refreshToken, tenant sandbox CNI deny & PTRACE paths.
+
+### 5. Test Coverage & CI Hardening
 ```bash
 npm run test:coverage
 ```
-- **Line Coverage**: **94.73%** lines (and **84.28%** branch coverage) across all core modules via `c8` code coverage instrumentation.
-- **Dependency Audit**: Verified via `npm audit --audit-level=high` (0 high/critical vulnerabilities).
-- **Automated SAST Scanning**: Continuous automated GitHub [CodeQL Security Analysis](.github/workflows/codeql.yml) analyzing JavaScript security.
+- **Coverage (nyc)**: **91.57% Stmt / 87.17% Branch** across all core `src/` modules (worker thread internals excluded — they run in a separate process).
+- **Thresholds enforced**: `--branches 75 --lines 85 --functions 85 --statements 85` (gate on every CI run).
+- **Dependency Audit**: Verified via `npm audit --audit-level=high` (**0 high/critical vulnerabilities**).
+- **Automated SAST Scanning**: Continuous [CodeQL Security Analysis](.github/workflows/codeql.yml) on every push.
 
-### 5. Supply Chain Security & Software Bill of Materials (SBOM)
+### 6. Supply Chain Security & Software Bill of Materials (SBOM)
 - **CycloneDX SBOM**: A complete CycloneDX 1.6 Bill of Materials is tracked in [`sbom.json`](sbom.json), documenting package hashes, licenses, and full dependency hierarchy.
 - **Terminal Session Cast**: Raw asciinema cast recording for CLI playback is available at [`assets/demo.cast`](assets/demo.cast).
 
@@ -387,7 +392,8 @@ curl http://localhost:3000/api/status
 ```
 bayora-secure-ai-safety/
 ├── .github/
-│   ├── workflows/ci.yml             # GitHub Actions CI matrix
+│   ├── workflows/ci.yml             # GitHub Actions CI matrix (Node 18/20/22)
+│   ├── workflows/codeql.yml         # Automated SAST security scanning
 │   ├── ISSUE_TEMPLATE/              # Bug report & security finding templates
 │   └── PULL_REQUEST_TEMPLATE.md     # PR verification checklist
 ├── src/
@@ -416,13 +422,13 @@ bayora-secure-ai-safety/
 │   └── js/app.js                    # Reactive client controller
 ├── Dockerfile                       # Multi-stage production container
 ├── docker-compose.yml               # Local compose configuration
+├── .nycrc                           # nyc coverage config (thresholds + includes)
+├── sbom.json                        # CycloneDX 1.6 software bill of materials
 ├── ARCHITECTURE.md                  # Comprehensive technical specification
 ├── CONTRIBUTING.md                  # Contributor guidelines
 ├── SECURITY.md                      # Security disclosure policy
 ├── CODE_OF_CONDUCT.md               # Contributor Covenant v2.1
-├── LICENSE                          # Apache 2.0 License
-├── bayora-redteam-review.md         # Original adversarial review document
-└── package.json                     # NPM project manifest
+└── LICENSE                          # Apache 2.0 (Copyright 2026 Anshuman)
 ```
 
 ---
