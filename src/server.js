@@ -6,6 +6,8 @@
 
 const express = require('express');
 const path = require('path');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const WormAuditStore = require('./audit/worm_store');
 const OpaPolicyEngine = require('./policy/opa_pdp');
 const VaultAuthority = require('./security/vault_authority');
@@ -14,13 +16,40 @@ const { RedSandbox, BlueSandbox } = require('./sandboxes/tenant_sandboxes');
 const AttackSimulationSuite = require('./attacks/simulation_suite');
 const sideChannelMitigations = require('./sidechannel/mitigations');
 const benchmarkRegistry = require('./datasets/benchmark_registry');
+const {
+  authenticate,
+  requireAuth,
+  requireRole,
+  demoEndpointGate
+} = require('./security/auth');
+const pkg = require('../package.json');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const HOST = process.env.HOST || '0.0.0.0';
+const HOST = process.env.HOST || '127.0.0.1';
 const NODE_ENV = process.env.NODE_ENV || 'development';
 
-app.use(express.json());
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", "data:"]
+    }
+  }
+}));
+
+const limiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: Number(process.env.RATE_LIMIT_MAX) || (process.env.NODE_ENV === 'test' ? 1000 : 60),
+  standardHeaders: true,
+  legacyHeaders: false
+});
+app.use(limiter);
+
+app.use(express.json({ limit: '32kb' }));
+app.use(authenticate);
 app.use(express.static(path.join(__dirname, '../public')));
 
 // Core Platform State
@@ -32,8 +61,21 @@ let redSandbox = new RedSandbox(broker, auditStore, opaPdp, vaultAuthority);
 let blueSandbox = new BlueSandbox(broker, auditStore, opaPdp, vaultAuthority);
 let simulationSuite = new AttackSimulationSuite();
 
+let lastIntegrityCheckTime = 0;
+let cachedAuditReport = null;
+function getCachedIntegrityReport() {
+  const now = Date.now();
+  if (!cachedAuditReport || (now - lastIntegrityCheckTime) > 5000) {
+    cachedAuditReport = auditStore.verifyIntegrity();
+    lastIntegrityCheckTime = now;
+  }
+  return cachedAuditReport;
+}
+
 // Helper to reset platform to clean state
 function resetPlatform() {
+  cachedAuditReport = null;
+  lastIntegrityCheckTime = 0;
   auditStore = new WormAuditStore();
   opaPdp = new OpaPolicyEngine();
   vaultAuthority = new VaultAuthority();
@@ -47,10 +89,11 @@ function resetPlatform() {
 // System Health & Topology API
 // -------------------------------------------------------------
 app.get('/api/status', (req, res) => {
-  const auditReport = auditStore.verifyIntegrity();
+  const auditReport = getCachedIntegrityReport();
   res.json({
-    status: 'HEALTHY',
-    version: '2.0.0-redteam-redesign',
+    status: auditStore.degraded ? 'DEGRADED' : (auditReport.isValid ? 'HEALTHY' : 'COMPROMISED'),
+    degradedReason: auditStore.degraded ? auditStore.degradedReason : undefined,
+    version: pkg.version,
     isolationTier: 'Kata Containers microVM (Target Architecture — modeled in PoC)',
     mandatoryMediation: 'ENABLED',
     activeSessions: broker.sessions.size,
@@ -71,80 +114,224 @@ app.get('/api/status', (req, res) => {
 // Session Lifecycle & State Machine API
 // -------------------------------------------------------------
 
-// Create new session (SETUP)
-app.post('/api/sessions', async (req, res) => {
+// Helper to extract capability token from request
+function extractCapabilityToken(req) {
+  const tokenHeader = req.headers['authorization'] || req.headers['x-capability-token'];
+  if (tokenHeader) {
+    try {
+      const clean = typeof tokenHeader === 'string' && tokenHeader.startsWith('Bearer ')
+        ? tokenHeader.slice(7)
+        : tokenHeader;
+      return JSON.parse(clean);
+    } catch (e) {
+      return { tokenId: tokenHeader };
+    }
+  }
+  if (req.query && req.query.token) {
+    try {
+      return JSON.parse(req.query.token);
+    } catch (e) {
+      return { tokenId: req.query.token };
+    }
+  }
+  return null;
+}
+
+// Create new session (SETUP) - Admin or Broker only, returns only sessionId
+app.post('/api/sessions', requireRole('admin', 'broker'), async (req, res) => {
   try {
-    const { disclosurePolicy } = req.body;
-    const sessionData = await broker.createSession(disclosurePolicy || 'REDACTED_DEFENSE');
-    res.json(sessionData);
+    const { disclosurePolicy } = req.body || {};
+    const policy = disclosurePolicy || 'REDACTED_DEFENSE';
+    const ALLOWED_POLICIES = ['REDACTED_DEFENSE', 'FULL_BENCHMARK', 'COARSE_STATUS'];
+
+    if (!ALLOWED_POLICIES.includes(policy)) {
+      return res.status(400).json({
+        error: `Invalid disclosure policy '${policy}'. Allowed: ${ALLOWED_POLICIES.join(', ')}`,
+        code: 'E_INVALID_DISCLOSURE_POLICY'
+      });
+    }
+
+    if (policy === 'FULL_BENCHMARK' && req.role !== 'admin' && req.role !== 'broker') {
+      return res.status(403).json({
+        error: "Forbidden: Only admin or broker role may select 'FULL_BENCHMARK' disclosure policy",
+        code: 'E_FORBIDDEN'
+      });
+    }
+
+    const sessionData = await broker.createSession(policy, req.role);
+    res.json({ sessionId: sessionData.sessionId });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    const status = err.statusCode || 500;
+    res.status(status).json({ error: err.message, code: err.code });
   }
 });
 
+// Canonical error responder collapsing status codes to 403 and body to { code, message }
+async function sendCanonicalError(res, err, startHrTime = null) {
+  if (startHrTime) {
+    await sideChannelMitigations.delayUntilNextBucket(startHrTime);
+  }
+  console.error('[API Error]:', err);
+  const canonical = sideChannelMitigations.toCanonicalError(err);
+  return res.status(403).json({
+    code: canonical.code,
+    message: canonical.message
+  });
+}
+
+// Retrieve caller-specific capability token for a session
+app.post('/api/sessions/:id/token', requireAuth, async (req, res) => {
+  const sessionId = req.params.id;
+  const session = broker.sessions.get(sessionId);
+  if (!session) {
+    return await sendCanonicalError(res, new Error('E_SESSION_NOT_FOUND'));
+  }
+
+  if (req.role === 'red') {
+    return res.json({ token: session.tokens.redToken, role: 'red' });
+  }
+  if (req.role === 'blue') {
+    return res.json({ token: session.tokens.blueToken, role: 'blue' });
+  }
+  if (req.role === 'admin') {
+    const requestedTenant = (req.body && req.body.tenant) || req.query.tenant;
+    if (requestedTenant === 'red') {
+      return res.json({ token: session.tokens.redToken, role: 'red' });
+    }
+    if (requestedTenant === 'blue') {
+      return res.json({ token: session.tokens.blueToken, role: 'blue' });
+    }
+    return res.json({
+      redToken: session.tokens.redToken,
+      blueToken: session.tokens.blueToken
+    });
+  }
+
+  return await sendCanonicalError(res, new Error('E_FORBIDDEN'));
+});
+
 // Submit Red Attack Payload (RED_TURN -> MODEL_INFERENCE -> EVAL)
-app.post('/api/sessions/:id/red-turn', async (req, res) => {
+// Quantized monotonic timing delay and canonical error handling
+app.post('/api/sessions/:id/red-turn', requireRole('red', 'admin'), async (req, res) => {
+  const startHrTime = process.hrtime.bigint();
   try {
-    const { payloadText, token } = req.body;
+    const { payloadText, token } = req.body || {};
     const sessionId = req.params.id;
 
     const result = await redSandbox.submitAttack(sessionId, payloadText, token);
+    await sideChannelMitigations.delayUntilNextBucket(startHrTime);
+    res.json({ sessionId: result.sessionId || sessionId, phase: 'ACCEPTED' });
+  } catch (err) {
+    await sendCanonicalError(res, err, startHrTime);
+  }
+});
+
+// Coarse pass/fail status for Red after CONCLUDE
+app.get('/api/sessions/:id/coarse-status', requireRole('red', 'admin'), async (req, res) => {
+  const startHrTime = process.hrtime.bigint();
+  try {
+    const sessionId = req.params.id;
+    const session = broker.sessions.get(sessionId);
+    if (!session) {
+      return await sendCanonicalError(res, new Error('E_SESSION_NOT_FOUND'), startHrTime);
+    }
+
+    if (session.phase !== 'CONCLUDE' && session.phase !== 'DISCLOSURE') {
+      const err = new Error(`State Machine Error: Cannot query coarse status in phase '${session.phase}'`);
+      err.code = 'E_STATE_MACHINE_ERROR';
+      return await sendCanonicalError(res, err, startHrTime);
+    }
+
+    const passed = session.modelResponse ? !session.modelResponse.isJailbreak : true;
+    await sideChannelMitigations.delayUntilNextBucket(startHrTime);
+    res.json({
+      sessionId,
+      phase: session.phase,
+      status: passed ? 'PASS' : 'FAIL'
+    });
+  } catch (err) {
+    await sendCanonicalError(res, err, startHrTime);
+  }
+});
+
+// Model output endpoint for Blue in BLUE_TURN phase
+app.get('/api/sessions/:id/model-output', requireRole('blue', 'admin'), async (req, res) => {
+  const startHrTime = process.hrtime.bigint();
+  try {
+    const sessionId = req.params.id;
+    const result = broker.getModelOutput(sessionId);
+    await sideChannelMitigations.delayUntilNextBucket(startHrTime);
     res.json(result);
   } catch (err) {
-    res.status(400).json({ error: err.message, canonical: sideChannelMitigations.toCanonicalError(err) });
+    await sendCanonicalError(res, err, startHrTime);
   }
 });
 
 // Submit Blue Defensive Evaluation (BLUE_TURN -> CONCLUDE)
-app.post('/api/sessions/:id/blue-turn', async (req, res) => {
+// Discards any client-supplied modelOutput; defense runs on real broker output
+app.post('/api/sessions/:id/blue-turn', requireRole('blue', 'admin'), async (req, res) => {
+  const startHrTime = process.hrtime.bigint();
   try {
-    const { modelOutput, token } = req.body;
+    const { token, ...params } = req.body || {};
     const sessionId = req.params.id;
 
-    const result = await blueSandbox.evaluateDefense(sessionId, modelOutput, token);
+    const result = await blueSandbox.evaluateDefense(sessionId, params, token);
+    await sideChannelMitigations.delayUntilNextBucket(startHrTime);
     res.json(result);
   } catch (err) {
-    res.status(400).json({ error: err.message, canonical: sideChannelMitigations.toCanonicalError(err) });
+    await sendCanonicalError(res, err, startHrTime);
   }
 });
 
 // Retrieve Post-Conclude Disclosure Bundle (CONCLUDE -> DISCLOSURE)
-app.get('/api/sessions/:id/disclosure', async (req, res) => {
+app.get('/api/sessions/:id/disclosure', requireRole('blue', 'admin'), async (req, res) => {
+  const startHrTime = process.hrtime.bigint();
   try {
     const sessionId = req.params.id;
-    const tokenHeader = req.headers['authorization'];
-    let token = null;
+    const token = extractCapabilityToken(req);
 
-    if (tokenHeader) {
-      try { token = JSON.parse(tokenHeader); } catch (e) { /* ignore */ }
-    }
-
-    // Fallback to active session blue token if client UI
-    const session = broker.sessions.get(sessionId);
-    if (!token && session) {
-      token = session.tokens.blueToken;
+    if (!token) {
+      await sideChannelMitigations.delayUntilNextBucket(startHrTime);
+      return res.status(401).json({
+        error: 'Authentication failed: Missing capability token for disclosure bundle',
+        code: 'E_TOKEN_MISSING'
+      });
     }
 
     const bundle = await broker.getDisclosureBundle(sessionId, token);
+    await sideChannelMitigations.delayUntilNextBucket(startHrTime);
     res.json(bundle);
   } catch (err) {
-    res.status(403).json({ error: err.message, canonical: sideChannelMitigations.toCanonicalError(err) });
+    await sendCanonicalError(res, err, startHrTime);
   }
 });
 
-// Premature Red Payload Query Attempt (Test Information Flow)
-app.get('/api/sessions/:id/red-payload-query', (req, res) => {
+// Red Payload Query Attempt (Information Flow Check)
+app.get('/api/sessions/:id/red-payload-query', requireRole('blue', 'admin'), async (req, res) => {
+  const startHrTime = process.hrtime.bigint();
   try {
     const sessionId = req.params.id;
-    const tokenHeader = req.headers['authorization'];
-    let token = null;
-    if (tokenHeader) {
-      try { token = JSON.parse(tokenHeader); } catch (e) { /* ignore */ }
+    const token = extractCapabilityToken(req);
+
+    if (!token) {
+      await sideChannelMitigations.delayUntilNextBucket(startHrTime);
+      return res.status(401).json({
+        error: 'Authentication failed: Missing capability token for red payload query',
+        code: 'E_TOKEN_MISSING'
+      });
     }
+
     const result = broker.queryRedPayload(sessionId, token);
+    if (!result.allowed) {
+      const err = new Error(result.reason || 'Query denied');
+      err.code = result.code || 'E_POLICY_DENIED';
+      return await sendCanonicalError(res, err, startHrTime);
+    }
+
+    await sideChannelMitigations.delayUntilNextBucket(startHrTime);
     res.json(result);
   } catch (err) {
-    res.status(403).json({ error: err.message });
+    await sendCanonicalError(res, err, startHrTime);
   }
 });
 
@@ -152,9 +339,9 @@ app.get('/api/sessions/:id/red-payload-query', (req, res) => {
 // WORM Audit & Cryptographic Provenance API
 // -------------------------------------------------------------
 
-// Query audit trail (Auditor or Broker only)
-app.get('/api/audit', (req, res) => {
-  const role = req.query.role || 'auditor';
+// Query audit trail (Auditor only)
+app.get('/api/audit', requireRole('auditor', 'admin'), (req, res) => {
+  const role = req.role;
   const sessionId = req.query.sessionId;
 
   try {
@@ -170,8 +357,8 @@ app.get('/api/audit', (req, res) => {
   }
 });
 
-// Check cryptographic integrity of audit chain
-app.get('/api/audit/integrity', (req, res) => {
+// Check cryptographic integrity of audit chain (Auditor only)
+app.get('/api/audit/integrity', requireRole('auditor', 'admin'), (req, res) => {
   const report = auditStore.verifyIntegrity();
   res.json({
     ...report,
@@ -181,11 +368,12 @@ app.get('/api/audit/integrity', (req, res) => {
 });
 
 // Simulate tampering with an audit block (Demonstrate tamper-evidence)
-app.post('/api/audit/tamper', (req, res) => {
+app.post('/api/audit/tamper', demoEndpointGate, (req, res) => {
   try {
     const { blockIndex, field, newValue } = req.body;
+    const idx = (blockIndex !== undefined && blockIndex !== null) ? parseInt(blockIndex, 10) : 1;
     const result = auditStore.simulateTamper(
-      parseInt(blockIndex, 10) || 1,
+      idx,
       field || 'eventType',
       newValue || 'MALICIOUS_TAMPERED_RECORD'
     );
@@ -200,7 +388,7 @@ app.post('/api/audit/tamper', (req, res) => {
 });
 
 // Reset platform to clean state
-app.post('/api/platform/reset', (req, res) => {
+app.post('/api/platform/reset', demoEndpointGate, (req, res) => {
   resetPlatform();
   res.json({ status: 'RESET_OK', message: 'Platform environment and audit store re-initialized.' });
 });
@@ -210,20 +398,21 @@ app.post('/api/platform/reset', (req, res) => {
 // -------------------------------------------------------------
 
 // Run all 9 PoC demonstration tests
-app.get('/api/poc-tests', async (req, res) => {
+app.get('/api/poc-tests', demoEndpointGate, async (req, res) => {
   try {
-    const results = await simulationSuite.runAllPocTests();
+    const suite = new AttackSimulationSuite();
+    const results = await suite.runAllPocTests();
     res.json({ results, allPassed: results.every(r => r.passed) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-
 // Run all 7 Attack Simulations
-app.get('/api/attack-sims', async (req, res) => {
+app.get('/api/attack-sims', demoEndpointGate, async (req, res) => {
   try {
-    const results = await simulationSuite.runAllAttackSimulations();
+    const suite = new AttackSimulationSuite();
+    const results = await suite.runAllAttackSimulations();
     res.json({ results, allMitigated: results.every(r => r.mitigationCertified) });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -231,31 +420,32 @@ app.get('/api/attack-sims', async (req, res) => {
 });
 
 // Run a single specific attack simulation
-app.post('/api/attack-sims/:id/run', async (req, res) => {
+app.post('/api/attack-sims/:id/run', demoEndpointGate, async (req, res) => {
   const simId = req.params.id;
   try {
+    const suite = new AttackSimulationSuite();
     let result = null;
     switch (simId) {
       case 'sim-1':
-        result = await simulationSuite.runAttackSim1_RedSandboxEscape();
+        result = await suite.runAttackSim1_RedSandboxEscape();
         break;
       case 'sim-2':
-        result = await simulationSuite.runAttackSim2_TimingSideChannel();
+        result = await suite.runAttackSim2_TimingSideChannel();
         break;
       case 'sim-3':
-        result = await simulationSuite.runAttackSim3_KvCacheProbe();
+        result = await suite.runAttackSim3_KvCacheProbe();
         break;
       case 'sim-4':
-        result = await simulationSuite.runAttackSim4_ConfusedDeputy();
+        result = await suite.runAttackSim4_ConfusedDeputy();
         break;
       case 'sim-5':
-        result = await simulationSuite.runAttackSim5_AuditTamper();
+        result = await suite.runAttackSim5_AuditTamper();
         break;
       case 'sim-6':
-        result = await simulationSuite.runAttackSim6_CanaryContamination();
+        result = await suite.runAttackSim6_CanaryContamination();
         break;
       case 'sim-7':
-        result = await simulationSuite.runAttackSim7_FaultInjection();
+        result = await suite.runAttackSim7_FaultInjection();
         break;
       default:
         return res.status(404).json({ error: `Unknown simulation ID: ${simId}` });
@@ -269,10 +459,17 @@ app.post('/api/attack-sims/:id/run', async (req, res) => {
 // -------------------------------------------------------------
 // Observability & Telemetry API
 // -------------------------------------------------------------
-app.get('/api/metrics/:tenant', (req, res) => {
+app.get('/api/metrics/:tenant', requireAuth, (req, res) => {
   const tenant = req.params.tenant;
   if (tenant !== 'red' && tenant !== 'blue' && tenant !== 'admin') {
     return res.status(400).json({ error: 'Invalid tenant identifier' });
+  }
+
+  if (req.role !== 'admin' && req.role !== tenant) {
+    return res.status(403).json({
+      error: `Forbidden: Tenant '${req.role}' cannot access metrics for '${tenant}'`,
+      code: 'E_FORBIDDEN'
+    });
   }
 
   // Simulated metrics bucketed into 10% ranges
@@ -313,10 +510,14 @@ app.get('/api/datasets/:id', (req, res) => {
   res.json(dataset);
 });
 
-app.listen(PORT, HOST, () => {
-  console.log(`================================================================`);
-  console.log(` BAYORA SECURE AI SAFETY TESTING PLATFORM (v2.0 Redesign)`);
-  console.log(` Server active on http://${HOST}:${PORT} (${NODE_ENV})`);
-  console.log(` Implementation of: bayora-redteam-review.md`);
-  console.log(`================================================================`);
-});
+if (require.main === module) {
+  app.listen(PORT, HOST, () => {
+    console.log(`================================================================`);
+    console.log(` BAYORA SECURE AI SAFETY TESTING PLATFORM (v2.0 Redesign)`);
+    console.log(` Server active on http://${HOST}:${PORT} (${NODE_ENV})`);
+    console.log(` Implementation of: bayora-redteam-review.md`);
+    console.log(`================================================================`);
+  });
+}
+
+module.exports = app;

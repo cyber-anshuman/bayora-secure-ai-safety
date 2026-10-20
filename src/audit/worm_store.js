@@ -5,28 +5,132 @@
  */
 
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+
+function canonicalizeObject(obj) {
+  if (obj === null || typeof obj !== 'object') return obj;
+  if (Array.isArray(obj)) return obj.map(canonicalizeObject);
+  const sortedKeys = Object.keys(obj).sort();
+  const result = {};
+  for (const k of sortedKeys) {
+    result[k] = canonicalizeObject(obj[k]);
+  }
+  return result;
+}
+
+const ALLOWED_EVENT_TYPES = new Set([
+  'GENESIS_BLOCK',
+  'SESSION_INITIALIZED',
+  'STATE_TRANSITION',
+  'ATTACK_PAYLOAD_SUBMITTED',
+  'DEFENSE_EVALUATED',
+  'MODEL_INFERENCE_COMPLETED',
+  'INFRASTRUCTURE_FAILURE',
+  'DISCLOSURE_BUNDLE_RELEASED',
+  'ANOMALOUS_ESCAPE_PROBE_INTERCEPTED',
+  'CONCLUDE',
+  // Test and verification event types
+  'TEST_EVENT',
+  'EV_A',
+  'EV_B',
+  'TURN_1',
+  'TURN_2',
+  'EVENT_0',
+  'EVENT_1',
+  'EVENT_2',
+  'EVENT_3',
+  'EVENT_4',
+  'EVENT_5'
+]);
 
 class WormAuditStore {
-  constructor() {
+  constructor(anchorSecret = null, storagePath = null) {
+    const envSecret = process.env.WORM_ANCHOR_SECRET || process.env.BAYORA_ANCHOR_SECRET;
+    const nodeEnv = process.env.NODE_ENV || 'development';
+
+    if (anchorSecret) {
+      if (typeof anchorSecret !== 'string' || anchorSecret.length < 32) {
+        throw new Error('WORM anchor secret must be at least 32 characters');
+      }
+      this.anchorSecret = anchorSecret;
+    } else if (envSecret) {
+      if (typeof envSecret !== 'string' || envSecret.length < 32) {
+        throw new Error('WORM_ANCHOR_SECRET must be at least 32 characters');
+      }
+      this.anchorSecret = envSecret;
+    } else if (nodeEnv === 'development' || nodeEnv === 'test') {
+      this.anchorSecret = crypto.randomBytes(32).toString('hex');
+    } else {
+      throw new Error('Refusing to start: WORM_ANCHOR_SECRET environment variable is required and must be at least 32 characters');
+    }
+
     this.chain = [];
     this.anchors = []; // Merkle roots anchored externally
     this.genesisHash = '0000000000000000000000000000000000000000000000000000000000000000';
-    this.storagePath = process.env.WORM_STORAGE_PATH || null;
+    this.storagePath = storagePath || process.env.WORM_STORAGE_PATH || null;
     this.externalAnchorServiceEnabled = process.env.EXTERNAL_ANCHOR_SERVICE_ENABLED !== 'false';
-    this.externalAnchorIntervalSec = Number(process.env.EXTERNAL_ANCHOR_INTERVAL_SEC) || 60;
-    this._initializeGenesis();
+    this.degraded = false;
+    this.degradedReason = null;
+
+    if (this.storagePath && fs.existsSync(this.storagePath)) {
+      this._loadFromStorage();
+    } else {
+      try {
+        this._initializeGenesis();
+      } catch (err) {
+        this.degraded = true;
+        this.degradedReason = err.message;
+      }
+    }
+  }
+
+  _loadFromStorage() {
+    try {
+      const content = fs.readFileSync(this.storagePath, 'utf8').trim();
+      if (!content) {
+        this._initializeGenesis();
+        return;
+      }
+      const lines = content.split('\n').filter(Boolean);
+      const loadedChain = [];
+      for (let i = 0; i < lines.length; i++) {
+        loadedChain.push(JSON.parse(lines[i]));
+      }
+      if (loadedChain.length === 0) {
+        this._initializeGenesis();
+        return;
+      }
+      this.chain = loadedChain;
+      const report = this.verifyIntegrity();
+      if (!report.isValid) {
+        this.degraded = true;
+        this.degradedReason = `Corrupted audit store at ${this.storagePath}`;
+        throw new Error(`WORM_INTEGRITY_VIOLATION: Existing audit log failed verification: ${report.errors.join('; ')}`);
+      }
+      if (this.externalAnchorServiceEnabled) {
+        this.publishMerkleAnchor();
+      }
+    } catch (err) {
+      if (err.message && err.message.startsWith('WORM_INTEGRITY_VIOLATION')) {
+        throw err;
+      }
+      this.degraded = true;
+      this.degradedReason = `Failed to load audit store: ${err.message}`;
+      throw new Error(`WORM_STORAGE_ERROR: Failed to load audit store from ${this.storagePath}: ${err.message}`);
+    }
   }
 
   _persistEntry(entry) {
     if (this.storagePath) {
       try {
-        const fs = require('fs');
-        const path = require('path');
         const dir = path.dirname(this.storagePath);
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
         fs.appendFileSync(this.storagePath, JSON.stringify(entry) + '\n', 'utf8');
       } catch (err) {
-        // Safe fall-through for memory-only or restricted environments
+        this.degraded = true;
+        this.degradedReason = `Persistence error: ${err.message}`;
+        throw new Error(`WORM_STORAGE_ERROR: Failed to persist audit entry to ${this.storagePath}: ${err.message}`);
       }
     }
   }
@@ -35,6 +139,7 @@ class WormAuditStore {
     const genesisEntry = {
       index: 0,
       timestamp: new Date().toISOString(),
+      sessionId: 'SYSTEM_GENESIS',
       tenant: 'SYSTEM',
       actor: 'bayora-provenance-init',
       eventType: 'GENESIS_BLOCK',
@@ -50,15 +155,62 @@ class WormAuditStore {
   }
 
   _calculateEntryHash(entry) {
-    const content = `${entry.index}|${entry.prevHash}|${entry.timestamp}|${entry.tenant}|${entry.actor}|${entry.eventType}|${entry.payloadHash}|${JSON.stringify(entry.details)}`;
+    const canonicalDetails = canonicalizeObject(entry.details || {});
+    const canonicalArray = [
+      entry.index,
+      entry.prevHash,
+      entry.timestamp,
+      entry.sessionId || 'N/A',
+      entry.tenant,
+      entry.actor,
+      entry.eventType,
+      entry.payloadHash,
+      canonicalDetails
+    ];
+    const content = JSON.stringify(canonicalArray);
     return crypto.createHash('sha256').update(content).digest('hex');
   }
 
   /**
    * Append a new event to the audit store.
-   * Enforces that tenants can write, but never delete or overwrite past records.
+   * Enforces that tenants can write, but never delete, overwrite past records, or impersonate SYSTEM.
    */
   append(eventData, callerRole = 'broker') {
+    // 1. Validate eventType allowlist
+    if (!eventData.eventType || !ALLOWED_EVENT_TYPES.has(eventData.eventType)) {
+      throw new Error(`INVALID_EVENT_TYPE: Event type '${eventData.eventType}' is not in allowed eventTypes list`);
+    }
+
+    // 2. Validate tenant and actor against callerRole; tenants must not impersonate SYSTEM
+    let tenant = eventData.tenant;
+    let actor = eventData.actor;
+
+    if (callerRole === 'red') {
+      if (tenant && tenant !== 'red') {
+        throw new Error(`E_AUDIT_TENANT_MISMATCH: Caller role 'red' cannot write audit events for tenant '${tenant}'`);
+      }
+      tenant = 'red';
+      if (actor && actor.toUpperCase().includes('SYSTEM')) {
+        throw new Error("E_AUDIT_IMPERSONATION: Tenant 'red' cannot impersonate SYSTEM actor");
+      }
+      actor = actor || 'red-sandbox-runner';
+    } else if (callerRole === 'blue') {
+      if (tenant && tenant !== 'blue') {
+        throw new Error(`E_AUDIT_TENANT_MISMATCH: Caller role 'blue' cannot write audit events for tenant '${tenant}'`);
+      }
+      tenant = 'blue';
+      if (actor && actor.toUpperCase().includes('SYSTEM')) {
+        throw new Error("E_AUDIT_IMPERSONATION: Tenant 'blue' cannot impersonate SYSTEM actor");
+      }
+      actor = actor || 'blue-sandbox-runner';
+    } else if (callerRole === 'auditor') {
+      throw new Error('E_AUDIT_WRITE_ONLY: Auditor cannot append events to audit store');
+    } else {
+      // broker, admin, system
+      tenant = tenant || 'SYSTEM';
+      actor = actor || callerRole;
+    }
+
     const lastEntry = this.chain[this.chain.length - 1];
     const newIndex = this.chain.length;
     const timestamp = new Date().toISOString();
@@ -73,8 +225,8 @@ class WormAuditStore {
       index: newIndex,
       timestamp,
       sessionId: eventData.sessionId || 'N/A',
-      tenant: eventData.tenant || 'SYSTEM',
-      actor: eventData.actor || callerRole,
+      tenant,
+      actor,
       eventType: eventData.eventType,
       payloadHash,
       details: eventData.details || {},
@@ -86,8 +238,8 @@ class WormAuditStore {
     this.chain.push(entry);
     this._persistEntry(entry);
 
-    // Anchor every 5 entries or on critical state changes
-    if (this.chain.length % 5 === 0 || eventData.eventType === 'CONCLUDE') {
+    // Anchor on every append when externalAnchorServiceEnabled is true
+    if (this.externalAnchorServiceEnabled) {
       this.publishMerkleAnchor();
     }
 
@@ -112,11 +264,14 @@ class WormAuditStore {
   }
 
   /**
-   * Compute Merkle Root over current chain leaves
+   * Compute Merkle Root over first `count` chain leaves
    */
-  getMerkleRoot(useStoredHashes = false) {
-    if (this.chain.length === 0) return this.genesisHash;
-    let leaves = this.chain.map(entry => useStoredHashes ? entry.entryHash : this._calculateEntryHash(entry));
+  getMerkleRootForRange(count, useStoredHashes = false) {
+    if (count <= 0 || this.chain.length === 0) return this.genesisHash;
+    const effectiveCount = Math.min(count, this.chain.length);
+    let leaves = this.chain.slice(0, effectiveCount).map(entry =>
+      useStoredHashes ? entry.entryHash : this._calculateEntryHash(entry)
+    );
 
     while (leaves.length > 1) {
       const nextLevel = [];
@@ -133,6 +288,13 @@ class WormAuditStore {
   }
 
   /**
+   * Compute Merkle Root over current chain leaves
+   */
+  getMerkleRoot(useStoredHashes = false) {
+    return this.getMerkleRootForRange(this.chain.length, useStoredHashes);
+  }
+
+  /**
    * Publish an external anchor (simulates Sigstore/Rekor public transparency log)
    */
   publishMerkleAnchor() {
@@ -145,7 +307,7 @@ class WormAuditStore {
       merkleRoot: root,
       timestamp: new Date().toISOString(),
       anchorIntervalSec: this.externalAnchorIntervalSec,
-      anchorSignature: crypto.createHmac('sha256', 'BAYORA_ANCHOR_SECRET').update(root).digest('hex')
+      anchorSignature: crypto.createHmac('sha256', this.anchorSecret).update(root).digest('hex')
     };
     this.anchors.push(anchor);
     return anchor;
@@ -163,7 +325,27 @@ class WormAuditStore {
       errors: []
     };
 
-    // 1. Verify Hash Chaining
+    if (this.chain.length === 0) {
+      verificationResults.isValid = false;
+      verificationResults.errors.push('Empty audit chain: missing genesis block');
+      return verificationResults;
+    }
+
+    // 1. Verify Genesis Block (Index 0)
+    const genesis = this.chain[0];
+    if (genesis.prevHash !== this.genesisHash) {
+      verificationResults.isValid = false;
+      verificationResults.brokenChainAt = 0;
+      verificationResults.errors.push(`Genesis block prevHash mismatch: expected ${this.genesisHash}, found ${genesis.prevHash}`);
+    }
+    const computedGenesisHash = this._calculateEntryHash(genesis);
+    if (genesis.entryHash !== computedGenesisHash) {
+      verificationResults.isValid = false;
+      verificationResults.brokenChainAt = 0;
+      verificationResults.errors.push('Genesis block tampering detected: stored hash does not match computed hash');
+    }
+
+    // 2. Verify Hash Chaining
     for (let i = 1; i < this.chain.length; i++) {
       const curr = this.chain[i];
       const prev = this.chain[i - 1];
@@ -171,7 +353,7 @@ class WormAuditStore {
       // Check linkage
       if (curr.prevHash !== prev.entryHash) {
         verificationResults.isValid = false;
-        verificationResults.brokenChainAt = i;
+        if (verificationResults.brokenChainAt === null) verificationResults.brokenChainAt = i;
         verificationResults.errors.push(`Broken hash link at block ${i}: expected prevHash ${prev.entryHash.slice(0, 10)}..., found ${curr.prevHash.slice(0, 10)}...`);
       }
 
@@ -179,19 +361,43 @@ class WormAuditStore {
       const computedHash = this._calculateEntryHash(curr);
       if (curr.entryHash !== computedHash) {
         verificationResults.isValid = false;
-        if (!verificationResults.brokenChainAt) verificationResults.brokenChainAt = i;
+        if (verificationResults.brokenChainAt === null) verificationResults.brokenChainAt = i;
         verificationResults.errors.push(`Content tampering detected at block ${i}: stored hash does not match computed hash`);
       }
     }
 
-    // 2. Verify Latest Anchor Merkle Root
-    if (this.anchors.length > 0) {
-      const latestAnchor = this.anchors[this.anchors.length - 1];
-      const currentRoot = this.getMerkleRoot();
-      if (latestAnchor.merkleRoot !== currentRoot && latestAnchor.blockCount === this.chain.length) {
-        verificationResults.merkleValid = false;
+    // 3. Verify Every Stored Anchor (Merkle Root, Truncation, and Signature)
+    for (let aIdx = 0; aIdx < this.anchors.length; aIdx++) {
+      const anchor = this.anchors[aIdx];
+
+      // Verify anchor HMAC signature with mandatory anchorSecret
+      const expectedSig = crypto.createHmac('sha256', this.anchorSecret).update(anchor.merkleRoot).digest('hex');
+      const sigBuf = Buffer.from(anchor.anchorSignature || '', 'hex');
+      const expectedSigBuf = Buffer.from(expectedSig, 'hex');
+      if (sigBuf.length !== expectedSigBuf.length || !crypto.timingSafeEqual(sigBuf, expectedSigBuf)) {
         verificationResults.isValid = false;
-        verificationResults.errors.push(`Merkle Root divergence: expected anchored root ${latestAnchor.merkleRoot.slice(0, 10)}..., found ${currentRoot.slice(0, 10)}...`);
+        verificationResults.merkleValid = false;
+        verificationResults.errors.push(`Invalid anchor signature detected for anchor ${aIdx} at blockCount ${anchor.blockCount}`);
+      }
+
+      // Check truncation: chain must have at least as many blocks as anchored
+      if (this.chain.length < anchor.blockCount) {
+        verificationResults.isValid = false;
+        verificationResults.merkleValid = false;
+        verificationResults.errors.push(
+          `Audit chain truncation detected: chain length ${this.chain.length} is less than anchored blockCount ${anchor.blockCount}`
+        );
+        continue;
+      }
+
+      // Recompute Merkle root over the first anchor.blockCount entries
+      const computedRoot = this.getMerkleRootForRange(anchor.blockCount);
+      if (anchor.merkleRoot !== computedRoot) {
+        verificationResults.isValid = false;
+        verificationResults.merkleValid = false;
+        verificationResults.errors.push(
+          `Merkle root divergence at anchor ${aIdx} (blockCount ${anchor.blockCount}): expected ${anchor.merkleRoot.slice(0, 10)}..., found ${computedRoot.slice(0, 10)}...`
+        );
       }
     }
 

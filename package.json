@@ -5,11 +5,12 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "test": "node test/poc_tests.js",
+    "test": "npm run test:all",
+    "lint": "eslint src/ test/",
     "test:unit": "node test/weight_integrity.test.js && node test/subsystems_unit.test.js",
     "test:isolation": "node test/worker_isolation.test.js",
     "test:attacks": "node test/attack_sim_tests.js",
-    "test:all": "node test/poc_tests.js && node test/weight_integrity.test.js && node test/subsystems_unit.test.js && node test/worker_isolation.test.js && node test/attack_sim_tests.js",
+    "test:all": "node test/poc_tests.js && node test/weight_integrity.test.js && node test/subsystems_unit.test.js && node test/worker_isolation.test.js && node test/attack_sim_tests.js && node --test test/http.test.js",
     "test:coverage": "nyc --reporter=text --reporter=lcov npm run test:all"
   },
   "keywords": [
@@ -32,12 +33,15 @@
   },
   "homepage": "https://github.com/cyber-anshuman/bayora-secure-ai-safety#readme",
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   },
   "dependencies": {
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "express-rate-limit": "^8.7.1",
+    "helmet": "^8.3.0"
   },
   "devDependencies": {
+    "eslint": "^10.13.0",
     "nyc": "^18.0.0"
   }
 }

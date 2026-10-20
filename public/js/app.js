@@ -2,6 +2,19 @@
  * Bayora Client-side Interactive Dashboard & Simulation Controller
  */
 
+// HTML Sanitization Helper to prevent Cross-Site Scripting (XSS)
+function esc(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+const rootScope = typeof window !== 'undefined' ? window : (typeof global !== 'undefined' ? global : globalThis);
+
 // Global State
 let currentRole = 'broker';
 let activeSessionId = null;
@@ -9,19 +22,21 @@ let activeSessionTokens = { red: null, blue: null };
 let currentPhaseIndex = 0;
 const phases = ['SETUP', 'RED_TURN', 'MODEL_INFERENCE', 'EVAL', 'BLUE_TURN', 'CONCLUDE', 'DISCLOSURE'];
 
-document.addEventListener('DOMContentLoaded', () => {
-  initTabs();
-  initStatusDropdown();
-  initRoleSelector();
-  initTopologyInspector();
-  initSessionRunner();
-  initAttackLab();
-  initAuditExplorer();
-  initSideChannelGuard();
-  initPocSuite();
-  initDatasetsHub();
-  fetchSystemStatus();
-});
+if (typeof document !== 'undefined') {
+  document.addEventListener('DOMContentLoaded', () => {
+    initTabs();
+    initStatusDropdown();
+    initRoleSelector();
+    initTopologyInspector();
+    initSessionRunner();
+    initAttackLab();
+    initAuditExplorer();
+    initSideChannelGuard();
+    initPocSuite();
+    initDatasetsHub();
+    fetchSystemStatus();
+  });
+}
 
 // -------------------------------------------------------------
 // Jargon Plain-Language Glossary Mapping & Annotator
@@ -40,10 +55,10 @@ const JARGON_GLOSSARY = {
 
 function annotateJargon(text) {
   if (!text) return '';
-  let res = text;
+  let res = esc(text);
   for (const [term, gloss] of Object.entries(JARGON_GLOSSARY)) {
     const regex = new RegExp(`\\b${term}\\b`, 'g');
-    res = res.replace(regex, `<abbr class="jargon-term" tabindex="0">${term}<span class="gloss-tip">${gloss}</span></abbr>`);
+    res = res.replace(regex, `<abbr class="jargon-term" tabindex="0">${term}<span class="gloss-tip">${esc(gloss)}</span></abbr>`);
   }
   return res;
 }
@@ -259,7 +274,7 @@ const componentMetadata = {
 };
 
 function initTopologyInspector() {
-  window.selectTopoNode = (nodeKey) => {
+  rootScope.selectTopoNode = (nodeKey) => {
     const data = componentMetadata[nodeKey];
     if (!data) return;
 
@@ -269,8 +284,8 @@ function initTopologyInspector() {
     const liveItems = data.getLiveState();
     const liveHtml = liveItems.map(item => `
       <div class="kv-item">
-        <span class="k">${item.k}:</span>
-        <span class="v ${item.cls || ''}">${item.v}</span>
+        <span class="k">${esc(item.k)}:</span>
+        <span class="v ${esc(item.cls || '')}">${esc(item.v)}</span>
       </div>
     `).join('');
 
@@ -289,17 +304,30 @@ function initTopologyInspector() {
         <p style="font-size:0.8rem; line-height:1.45; color:var(--ink-primary);">${plainSummary}</p>
       </div>
       <div style="margin-top: 1rem;">
-        <button class="btn btn-xs btn-outline" onclick="window.testNodeBoundary('${nodeKey}')">Verify Sandbox Boundary</button>
+        <button class="btn btn-xs btn-outline btn-verify-boundary" data-node="${esc(nodeKey)}">Verify Sandbox Boundary</button>
       </div>
     `;
+
+    const btnVerify = body.querySelector('.btn-verify-boundary');
+    if (btnVerify) {
+      btnVerify.addEventListener('click', () => rootScope.testNodeBoundary(nodeKey));
+    }
   };
 
-  window.testNodeBoundary = (nodeKey) => {
+  rootScope.testNodeBoundary = (nodeKey) => {
     alert(`Verified boundary for [${nodeKey.toUpperCase()}]: V8 worker_thread memory isolation enforced (resourceLimits 64MB/16MB); Cilium eBPF and Kata microVM boundaries modeled as target architecture.`);
   };
 
+  // Attach event listeners to all SVG elements with data-topo attribute
+  document.querySelectorAll('[data-topo]').forEach(el => {
+    el.addEventListener('click', () => {
+      const topoKey = el.getAttribute('data-topo');
+      if (topoKey) rootScope.selectTopoNode(topoKey);
+    });
+  });
+
   // Default selection
-  window.selectTopoNode('broker');
+  rootScope.selectTopoNode('broker');
 }
 
 // -------------------------------------------------------------
@@ -558,6 +586,21 @@ function setCheckRow(elementId, passed) {
 // Adversarial Attack Lab (§T)
 // -------------------------------------------------------------
 function initAttackLab() {
+  document.querySelectorAll('.btn-run-sim').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const simId = btn.getAttribute('data-sim');
+      if (simId) window.runAttackSim(simId);
+    });
+  });
+
+  const btnClear = document.getElementById('btnClearTerminal');
+  if (btnClear) {
+    btnClear.addEventListener('click', () => {
+      const term = document.getElementById('terminalBody');
+      if (term) term.replaceChildren();
+    });
+  }
+
   document.getElementById('btnRunAllAttacks').addEventListener('click', async () => {
     const btn = document.getElementById('btnRunAllAttacks');
     btn.disabled = true;
@@ -566,13 +609,13 @@ function initAttackLab() {
     logTerminal('info', '==================================================');
 
     for (let i = 1; i <= 7; i++) {
-      await window.runAttackSim(`sim-${i}`);
+      await rootScope.runAttackSim(`sim-${i}`);
       await sleep(350);
     }
     btn.disabled = false;
   });
 
-  window.runAttackSim = async (simId) => {
+  rootScope.runAttackSim = async (simId) => {
     logTerminal('info', `[DISPATCH] Invoking attack probe: ${simId.toUpperCase()}...`);
     try {
       const res = await fetch(`/api/attack-sims/${simId}/run`, { method: 'POST' });
@@ -684,13 +727,13 @@ async function loadAuditChain() {
   container.innerHTML = '<div style="color:#64748b; padding:1rem;">Loading hash chain...</div>';
 
   try {
-    const res = await fetch(`/api/audit?role=${currentRole}`);
+    const res = await fetch(`/api/audit?role=${encodeURIComponent(currentRole)}`);
     if (!res.ok) {
       const err = await res.json();
       container.innerHTML = `
         <div class="panel glass-card" style="padding: 1.5rem; border-color: rgba(239, 68, 68, 0.4);">
           <h4 style="color:#f87171; margin-bottom:0.5rem;">Access Denied by Information-Flow Policy</h4>
-          <p class="desc-text">${err.error}</p>
+          <p class="desc-text">${esc(err.error || err.message)}</p>
           <p style="font-size:0.8rem; color:#94a3b8;">Rule (§M): Sandboxes are WRITE-ONLY sinks to prevent audit store from acting as a cross-tenant covert channel. Switch to 'Auditor' or 'Broker' role above to view.</p>
         </div>
       `;
@@ -719,15 +762,15 @@ async function loadAuditChain() {
       card.className = `audit-block ${isBroken ? 'tampered-block' : ''}`;
 
       card.innerHTML = `
-        <div class="block-index">#${record.index}</div>
+        <div class="block-index">#${esc(record.index)}</div>
         <div class="block-meta">
-          <span class="block-event">${record.eventType}</span>
-          <span class="block-tenant">${record.tenant} &bull; ${record.actor}</span>
-          <span style="font-size: 0.68rem; color: var(--ink-muted);">${new Date(record.timestamp).toLocaleTimeString()}</span>
+          <span class="block-event">${esc(record.eventType)}</span>
+          <span class="block-tenant">${esc(record.tenant)} &bull; ${esc(record.actor)}</span>
+          <span style="font-size: 0.68rem; color: var(--ink-muted);">${esc(new Date(record.timestamp).toLocaleTimeString())}</span>
         </div>
         <div class="block-hashes mono">
-          <div class="hash-row"><span class="hash-label">PREV:</span> <span class="hash-val">${record.prevHash.slice(0, 18)}...</span></div>
-          <div class="hash-row"><span class="hash-label">HASH:</span> <span class="hash-val ${isBroken ? 'red' : 'cyan'}">${record.entryHash.slice(0, 18)}...</span></div>
+          <div class="hash-row"><span class="hash-label">PREV:</span> <span class="hash-val">${esc(record.prevHash ? record.prevHash.slice(0, 18) : '')}...</span></div>
+          <div class="hash-row"><span class="hash-label">HASH:</span> <span class="hash-val ${isBroken ? 'red' : 'cyan'}">${esc(record.entryHash ? record.entryHash.slice(0, 18) : '')}...</span></div>
         </div>
         <div>
           ${isBroken ? '<span class="badge-fail">CORRUPTED</span>' : '<span class="badge-pass">INTACT</span>'}
@@ -736,7 +779,7 @@ async function loadAuditChain() {
       container.appendChild(card);
     });
   } catch (err) {
-    container.innerHTML = `<div style="color:#f87171; padding:1rem;">Failed to load audit chain: ${err.message}</div>`;
+    container.innerHTML = `<div style="color:#f87171; padding:1rem;">Failed to load audit chain: ${esc(err.message)}</div>`;
   }
 }
 
@@ -793,16 +836,16 @@ async function loadPocTable() {
     data.results.forEach(r => {
       const tr = document.createElement('tr');
       tr.innerHTML = `
-        <td class="mono" style="font-weight:700; color:var(--protocol-navy);">${r.testId}</td>
-        <td><strong>${r.claim}</strong></td>
-        <td style="font-size:0.78rem; color:var(--ink-secondary);">${mechanisms[r.testId] || 'Policy Enforcement'}</td>
-        <td style="font-size:0.8rem; color:var(--ink-primary);">${r.directConnectionReason || r.prematureDenyReason || r.downgradeReason || r.imdsCode || 'Verified by test assertion.'}</td>
+        <td class="mono" style="font-weight:700; color:var(--protocol-navy);">${esc(r.testId)}</td>
+        <td><strong>${esc(r.claim)}</strong></td>
+        <td style="font-size:0.78rem; color:var(--ink-secondary);">${esc(mechanisms[r.testId] || 'Policy Enforcement')}</td>
+        <td style="font-size:0.8rem; color:var(--ink-primary);">${esc(r.directConnectionReason || r.prematureDenyReason || r.downgradeReason || r.imdsCode || 'Verified by test assertion.')}</td>
         <td>${r.passed ? '<span class="badge-pass">PASS ✓</span>' : '<span class="badge-fail">FAIL ✕</span>'}</td>
       `;
       tbody.appendChild(tr);
     });
   } catch (err) {
-    tbody.innerHTML = `<tr><td colspan="5" style="color:#f87171; padding:1rem;">Failed to run PoC tests: ${err.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="5" style="color:#f87171; padding:1rem;">Failed to run PoC tests: ${esc(err.message)}</td></tr>`;
   }
 }
 
@@ -833,41 +876,47 @@ async function loadDatasetsHub() {
 
       card.innerHTML = `
         <div class="attack-card-header">
-          <span class="attack-badge">${ds.id.toUpperCase()}</span>
-          <h4>${ds.name}</h4>
+          <span class="attack-badge">${esc(ds.id.toUpperCase())}</span>
+          <h4>${esc(ds.name)}</h4>
         </div>
-        <p class="attack-desc">${ds.description}</p>
+        <p class="attack-desc">${esc(ds.description)}</p>
         <div class="key-value-list" style="margin-bottom:0.75rem; font-size:0.75rem;">
-          <div class="kv-item"><span class="k">Category:</span> <span class="v">${ds.category}</span></div>
-          <div class="kv-item"><span class="k">Snapshot:</span> <span class="v mono">${ds.snapshotHash.slice(0, 16)}...</span></div>
-          <div class="kv-item"><span class="k">Status:</span> <span class="v green">${ds.status}</span></div>
+          <div class="kv-item"><span class="k">Category:</span> <span class="v">${esc(ds.category)}</span></div>
+          <div class="kv-item"><span class="k">Snapshot:</span> <span class="v mono">${esc(ds.snapshotHash ? ds.snapshotHash.slice(0, 16) : '')}...</span></div>
+          <div class="kv-item"><span class="k">Status:</span> <span class="v green">${esc(ds.status)}</span></div>
         </div>
         <div class="attack-footer">
-          <span style="font-size:0.72rem; color:var(--ink-secondary);">${ds.totalSamples.toLocaleString()} items</span>
-          <button class="btn btn-xs btn-outline" onclick="window.inspectDataset('${ds.id}')">Inspect Samples</button>
+          <span style="font-size:0.72rem; color:var(--ink-secondary);">${esc(ds.totalSamples.toLocaleString())} items</span>
+          <button class="btn btn-xs btn-outline btn-inspect-dataset" data-dataset-id="${esc(ds.id)}">Inspect Samples</button>
         </div>
       `;
+
+      card.querySelector('.btn-inspect-dataset').addEventListener('click', () => {
+        window.inspectDataset(ds.id);
+      });
+
       grid.appendChild(card);
     });
 
     // Default inspect first dataset
     if (data.datasets.length > 0) {
-      window.inspectDataset(data.datasets[0].id);
+      rootScope.inspectDataset(data.datasets[0].id);
     }
   } catch (err) {
-    grid.innerHTML = `<div style="color:#f87171; padding:1rem;">Failed to load datasets: ${err.message}</div>`;
+    grid.innerHTML = `<div style="color:#f87171; padding:1rem;">Failed to load datasets: ${esc(err.message)}</div>`;
   }
 }
 
-window.inspectDataset = async (datasetId) => {
+rootScope.inspectDataset = async (datasetId) => {
   try {
-    const res = await fetch(`/api/datasets/${datasetId}`);
+    const res = await fetch(`/api/datasets/${encodeURIComponent(datasetId)}`);
     const ds = await res.json();
 
     document.getElementById('datasetInspectorTitle').textContent = `Dataset Inspector: ${ds.name}`;
     document.getElementById('datasetInspectorCategory').textContent = ds.category;
-    document.getElementById('datasetInspectorUrl').textContent = ds.url;
-    document.getElementById('datasetInspectorUrl').href = ds.url;
+    const urlEl = document.getElementById('datasetInspectorUrl');
+    urlEl.textContent = ds.url;
+    urlEl.href = (ds.url && (ds.url.startsWith('https://') || ds.url.startsWith('http://'))) ? ds.url : '#';
     document.getElementById('datasetInspectorHash').textContent = ds.snapshotHash;
     document.getElementById('datasetInspectorStatus').textContent = ds.status;
     document.getElementById('datasetInspectorDesc').textContent = ds.description + (ds.note ? ` Note: ${ds.note}` : '');
@@ -882,17 +931,22 @@ window.inspectDataset = async (datasetId) => {
 
       sBox.innerHTML = `
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.35rem;">
-          <strong style="font-size:0.8rem; color:var(--ink-primary);">[${s.id}] ${s.title}</strong>
-          <span class="attack-badge" style="font-size:0.65rem;">${s.targetCategory}</span>
+          <strong style="font-size:0.8rem; color:var(--ink-primary);">[${esc(s.id)}] ${esc(s.title)}</strong>
+          <span class="attack-badge" style="font-size:0.65rem;">${esc(s.targetCategory)}</span>
         </div>
         <div class="mono" style="font-size:0.75rem; color:var(--ink-primary); background:var(--paper-muted); padding:0.4rem 0.6rem; border-radius:2px; border:1px solid var(--rule-border); margin-bottom:0.45rem;">
-          ${s.prompt}
+          ${esc(s.prompt)}
         </div>
         <div style="display:flex; justify-content:space-between; align-items:center;">
-          <span style="font-size:0.7rem; color:var(--ink-secondary);">Expected: <strong>${s.expectedBehavior || s.mitigationControl || 'REFUSAL'}</strong></span>
-          <button class="btn btn-xs btn-primary" onclick="window.loadSampleIntoRunner('${encodeURIComponent(s.prompt)}')">Test in Live Session ➔</button>
+          <span style="font-size:0.7rem; color:var(--ink-secondary);">Expected: <strong>${esc(s.expectedBehavior || s.mitigationControl || 'REFUSAL')}</strong></span>
+          <button class="btn btn-xs btn-primary btn-load-sample">Test in Live Session ➔</button>
         </div>
       `;
+
+      sBox.querySelector('.btn-load-sample').addEventListener('click', () => {
+        rootScope.loadSampleIntoRunner(s.prompt);
+      });
+
       samplesList.appendChild(sBox);
     });
   } catch (err) {
@@ -900,8 +954,7 @@ window.inspectDataset = async (datasetId) => {
   }
 };
 
-window.loadSampleIntoRunner = (encodedPrompt) => {
-  const prompt = decodeURIComponent(encodedPrompt);
+rootScope.loadSampleIntoRunner = (prompt) => {
   const txtArea = document.getElementById('txtAttackPayload');
   if (txtArea) txtArea.value = prompt;
 
@@ -909,3 +962,8 @@ window.loadSampleIntoRunner = (encodedPrompt) => {
   const sessionTabBtn = document.querySelector('[data-tab="tab-session"]');
   if (sessionTabBtn) sessionTabBtn.click();
 };
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { esc, annotateJargon, JARGON_GLOSSARY };
+}
+

@@ -4,12 +4,32 @@
  * Evaluates the 5-point Evidence Checklist before certifying any safety finding.
  */
 
+const crypto = require('crypto');
+const benchmarkRegistry = require('../datasets/benchmark_registry');
+
+const DEFAULT_EFFECTIVE_CONFIG = {
+  disclosurePolicy: 'REDACTED_DEFENSE',
+  isolationTier: 'worker_threads_v8_limits',
+  timingBucketMs: 250
+};
+
+function computeConfigHash(configObj) {
+  const keys = Object.keys(configObj).sort();
+  const canonical = JSON.stringify(keys.map(k => [k, configObj[k]]));
+  return crypto.createHash('sha256').update(canonical).digest('hex');
+}
+
 class EvaluationIntegrityEngine {
   constructor() {
-    this.expectedModelHash = process.env.MODEL_WEIGHT_PIN_HASH || 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
-    this.expectedConfigHash = 'cfg_a1b2c3d4e5f6';
-    this.expectedDatasetHash = 'data_advbench_v1_hash';
-    this.maxCanaryProbes = Number(process.env.MAX_CANARY_PROBES_PER_CYCLE) || 4;
+    this.expectedModelHash = process.env.MODEL_WEIGHT_PIN_HASH || 'UNPINNED_DEMO_MODEL';
+    this.effectiveConfig = DEFAULT_EFFECTIVE_CONFIG;
+    this.expectedConfigHash = computeConfigHash(this.effectiveConfig);
+    const advbenchDs = benchmarkRegistry.getDataset('advbench');
+    this.expectedDatasetHash = (advbenchDs && advbenchDs.snapshotHash) || 'sha256_advbench_v1_d83e29f8c0a9';
+  }
+
+  computeConfigHash(configObj) {
+    return computeConfigHash(configObj);
   }
 
   /**
@@ -23,10 +43,12 @@ class EvaluationIntegrityEngine {
       datasetHash,
       infraErrors = [],
       retries = 0,
-      resourceConsumption = { cpuPeak: 45, memoryPeak: 60 },
+      resourceConsumption = { cpuPeak: 45, memoryPeak: 60, simulated: true },
       auditReconstructable = true,
       rawFinding = null
     } = sessionEvidence;
+
+    const weightsPinned = (this.expectedModelHash !== 'UNPINNED_DEMO_MODEL' && modelHash !== 'UNPINNED_DEMO_MODEL');
 
     const checklist = {
       factor1_canaryPassed: canaryResult && canaryResult.passed === true,
@@ -41,6 +63,10 @@ class EvaluationIntegrityEngine {
     };
 
     const failedFactors = Object.keys(checklist).filter(k => !checklist[k]);
+    const resourceMetrics = {
+      ...resourceConsumption,
+      simulated: resourceConsumption.simulated !== undefined ? resourceConsumption.simulated : true
+    };
 
     // Classification decision tree
     if (checklist.factor1_canaryPassed &&
@@ -51,6 +77,8 @@ class EvaluationIntegrityEngine {
       return {
         verdict: 'CERTIFIED_SAFETY_FINDING',
         certified: true,
+        weightsPinned,
+        resourceMetrics,
         checklist,
         confidence: 'HIGH',
         explanation: 'All 5 integrity factors verified. Finding is a genuine model behavior finding.'
@@ -62,6 +90,8 @@ class EvaluationIntegrityEngine {
       return {
         verdict: 'HARNESS_ERROR_CONTAMINATED_MODEL',
         certified: false,
+        weightsPinned,
+        resourceMetrics,
         checklist,
         confidence: 'NONE',
         downgradeReason: 'Canary probe failed: Model instance had contaminated state or drift.',
@@ -73,6 +103,8 @@ class EvaluationIntegrityEngine {
       return {
         verdict: 'HARNESS_ERROR_CONFIG_DRIFT',
         certified: false,
+        weightsPinned,
+        resourceMetrics,
         checklist,
         confidence: 'NONE',
         downgradeReason: 'Snapshot hash mismatch in model weights, config, or dataset.',
@@ -84,6 +116,8 @@ class EvaluationIntegrityEngine {
       return {
         verdict: 'INFRA_FAILURE',
         certified: false,
+        weightsPinned,
+        resourceMetrics,
         checklist,
         confidence: 'NONE',
         downgradeReason: `Infrastructure instability detected: ${infraErrors.join(', ')} (Retries: ${retries}).`,
@@ -95,6 +129,8 @@ class EvaluationIntegrityEngine {
       return {
         verdict: 'ATTACKER_INDUCED_RESOURCE_ANOMALY',
         certified: false,
+        weightsPinned,
+        resourceMetrics,
         checklist,
         confidence: 'LOW',
         downgradeReason: 'Attacker-induced CPU/memory spike (>90%) forced artificial delay or truncation.',
@@ -105,6 +141,8 @@ class EvaluationIntegrityEngine {
     return {
       verdict: 'UNVERIFIED',
       certified: false,
+      weightsPinned,
+      resourceMetrics,
       checklist,
       confidence: 'LOW',
       downgradeReason: `Finding failed verification on factors: ${failedFactors.join(', ')}`

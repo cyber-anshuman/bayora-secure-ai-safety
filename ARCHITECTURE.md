@@ -124,3 +124,13 @@ To transition this reference implementation from a single-process Node.js demons
 3. **External Policy & Secrets Daemons**: Transition in-process policy evaluation and HMAC authority to an external **Open Policy Agent (OPA) / Rego** sidecar daemon and **HashiCorp Vault / SPIFFE-SPIRE** mTLS service identity mesh with automated short-lived certificate rotation.
 4. **Hardware Topology & Anti-Affinity Scheduling**: Transition the static lookup tables in `mitigations.js` to active **Kubernetes CPU Manager (`static` policy)** and NUMA-aware Topology Manager allocations, physically scheduling adversarial pods across disjoint NUMA nodes, distinct L3 cache slices, and non-overlapping CPU cores.
 5. **Hardware-Isolated Inference Serving**: Point the Broker's model dispatch interface from the simulated `inference_worker.js` to a hardened, dedicated **vLLM / TGI** serving instance running inside a confidential GPU enclave (e.g. NVIDIA H100 Confidential Computing) with strict per-session KV-cache purges and automated golden weight verification.
+
+---
+
+## 8. Known Limitations of the Demonstration PoC
+
+1. **No Hypervisor Enforcement**: In this reference PoC, isolation between tenants is enforced at the JavaScript engine tier using Node.js `worker_threads` with V8 isolate memory limits (`resourceLimits`). True OS kernel, syscall, and filesystem isolation (Kata Containers microVMs) is modeled in configuration metadata rather than hardware-enforced.
+2. **No Kernel eBPF Enforcement**: Network security is evaluated via in-process OPA PDP logic (`OpaPolicyEngine`) rather than live Linux kernel eBPF bytecode hooks.
+3. **Scripted Inference Stub**: The inference engine (`DedicatedInferenceWorker`) is a scripted deterministic model stand-in designed for reproducible test evaluation, not a live neural network on GPU infrastructure.
+4. **Audit Anchor Trust Limits**: External Merkle root audit anchors are HMAC-signed; their immutability is as trustworthy as the storage medium and private keys used to publish them.
+

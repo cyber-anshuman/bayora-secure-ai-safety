@@ -27,19 +27,41 @@ class RedSandbox {
   /**
    * Submit an attack payload through the mediated Broker channel
    */
-  async submitAttack(sessionId, payloadText, token) {
-    // 1. Enforce network egress policy
-    const netCheck = this.opa.evaluateNetworkConnection('red', 'broker');
+  async submitAttack(sessionId, payloadText, token, destination = 'broker', destinationIp = null) {
+    // 1. Enforce network egress policy against destination
+    const netCheck = this.opa.evaluateNetworkConnection('red', destination, destinationIp);
     if (netCheck.verdict !== 'ALLOW') {
-      throw new Error(`CNI Deny: ${netCheck.reason}`);
+      const err = new Error(`CNI Deny: ${netCheck.reason}`);
+      err.code = 'E_OPA_NETWORK_DENY';
+      throw err;
     }
 
-    // 2. Validate schema
+    // 2. Validate session existence
+    if (this.broker && this.broker.sessions && typeof this.broker.sessions.get === 'function') {
+      const session = this.broker.sessions.get(sessionId);
+      if (!session) {
+        const err = new Error('E_SESSION_NOT_FOUND');
+        err.code = 'E_SESSION_NOT_FOUND';
+        throw err;
+      }
+    }
+
+    // 3. Validate schema
     if (!payloadText || typeof payloadText !== 'string' || payloadText.trim().length === 0) {
       throw new Error('Schema Error: Red payload must be a non-empty string');
     }
 
-    // 3. Compute digest via isolated V8 worker thread
+    // 4. Validate capability token BEFORE any audit logging or expensive compute
+    if (this.vault && typeof this.vault.validateCapability === 'function') {
+      const capCheck = this.vault.validateCapability(token, 'submit_attack', sessionId, 'red');
+      if (!capCheck.valid) {
+        const err = new Error(`Vault Deny: ${capCheck.reason}`);
+        err.code = 'E_AUTH_FAILED';
+        throw err;
+      }
+    }
+
+    // 4. Compute digest via isolated V8 worker thread
     const workerResult = await runInIsolatedWorker(
       'red',
       { type: 'DIGEST', payloadText },
@@ -47,7 +69,7 @@ class RedSandbox {
     );
     const digest = workerResult.digest;
 
-    // 4. Append evidence to WORM audit log (Write-Only)
+    // 5. Append evidence to WORM audit log (Write-Only) - only AFTER capability check succeeds
     this.audit.append({
       sessionId,
       tenant: 'red',
@@ -57,7 +79,7 @@ class RedSandbox {
       details: { sizeBytes: Buffer.byteLength(payloadText, 'utf8') }
     }, 'red');
 
-    // 5. Send to broker
+    // 6. Send to broker
     return await this.broker.processRedTurn(sessionId, payloadText, token);
   }
 
@@ -122,10 +144,46 @@ class BlueSandbox {
   /**
    * Evaluate model output from defensive standpoint
    */
-  async evaluateDefense(sessionId, modelOutput, token) {
-    const netCheck = this.opa.evaluateNetworkConnection('blue', 'broker');
+  async evaluateDefense(sessionId, modelOutput, token, destination = 'broker', destinationIp = null) {
+    // 1. Enforce network egress policy against destination
+    const netCheck = this.opa.evaluateNetworkConnection('blue', destination, destinationIp);
     if (netCheck.verdict !== 'ALLOW') {
-      throw new Error(`CNI Deny: ${netCheck.reason}`);
+      const err = new Error(`CNI Deny: ${netCheck.reason}`);
+      err.code = 'E_OPA_NETWORK_DENY';
+      throw err;
+    }
+
+    // Validate session existence
+    if (this.broker && this.broker.sessions && typeof this.broker.sessions.get === 'function') {
+      const session = this.broker.sessions.get(sessionId);
+      if (!session) {
+        const err = new Error('E_SESSION_NOT_FOUND');
+        err.code = 'E_SESSION_NOT_FOUND';
+        throw err;
+      }
+    }
+
+    // 1. Validate capability token BEFORE any audit logging or expensive compute
+    if (this.vault && typeof this.vault.validateCapability === 'function') {
+      const capCheck = this.vault.validateCapability(token, 'submit_defense', sessionId, 'blue');
+      if (!capCheck.valid) {
+        const err = new Error(`Vault Deny: ${capCheck.reason}`);
+        err.code = 'E_AUTH_FAILED';
+        throw err;
+      }
+    }
+
+    // Blue receives normalized model output from the broker, never trusting client-supplied text
+    let textToScan = '';
+    if (this.broker && typeof this.broker.getModelOutput === 'function') {
+      try {
+        const brokerOutput = this.broker.getModelOutput(sessionId);
+        textToScan = brokerOutput.modelOutput || '';
+      } catch (err) {
+        textToScan = '';
+      }
+    } else if (typeof modelOutput === 'string') {
+      textToScan = modelOutput;
     }
 
     // Defensive classifier scan executed in isolated V8 worker thread
@@ -133,7 +191,7 @@ class BlueSandbox {
       'blue',
       {
         type: 'KEYWORD_SCAN',
-        text: modelOutput,
+        text: textToScan,
         keywords: [...this.defenseLogic.signatureKeywords, 'exploit_payload']
       },
       this.workerResourceLimits
@@ -146,7 +204,7 @@ class BlueSandbox {
       timestamp: new Date().toISOString()
     };
 
-    // Log to WORM audit store (Write-Only)
+    // Log to WORM audit store (Write-Only) - only AFTER capability check succeeds
     this.audit.append({
       sessionId,
       tenant: 'blue',

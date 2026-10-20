@@ -6,21 +6,30 @@
  * Enforces least-privilege, network isolation, and state-gated information flow.
  */
 
+const GOLDEN_NETWORK_ALLOW_LIST = [
+  { from: 'red', to: 'broker', allowed: true },
+  { from: 'blue', to: 'broker', allowed: true },
+  { from: 'model', to: 'broker', allowed: true },
+  { from: 'broker', to: 'model', allowed: true },
+  { from: 'broker', to: 'red', allowed: true },
+  { from: 'broker', to: 'blue', allowed: true },
+  { from: 'red', to: 'audit', allowed: true, mode: 'write_only' },
+  { from: 'blue', to: 'audit', allowed: true, mode: 'write_only' },
+  { from: 'broker', to: 'audit', allowed: true, mode: 'read_write' },
+  { from: 'auditor', to: 'audit', allowed: true, mode: 'read_only' }
+];
+
 class OpaPolicyEngine {
   constructor() {
-    this.strictEbpf = process.env.ENABLE_STRICT_EBPF !== 'false';
-    this.networkAllowList = [
-      { from: 'red', to: 'broker', allowed: true },
-      { from: 'blue', to: 'broker', allowed: true },
-      { from: 'model', to: 'broker', allowed: true },
-      { from: 'broker', to: 'model', allowed: true },
-      { from: 'broker', to: 'red', allowed: true },
-      { from: 'broker', to: 'blue', allowed: true },
-      { from: 'red', to: 'audit', allowed: true, mode: 'write_only' },
-      { from: 'blue', to: 'audit', allowed: true, mode: 'write_only' },
-      { from: 'broker', to: 'audit', allowed: true, mode: 'read_write' },
-      { from: 'auditor', to: 'audit', allowed: true, mode: 'read_only' }
-    ];
+    this.networkAllowList = JSON.parse(JSON.stringify(GOLDEN_NETWORK_ALLOW_LIST));
+  }
+
+  detectPolicyDrift() {
+    return JSON.stringify(this.networkAllowList) !== JSON.stringify(GOLDEN_NETWORK_ALLOW_LIST);
+  }
+
+  restoreGoldenPolicy() {
+    this.networkAllowList = JSON.parse(JSON.stringify(GOLDEN_NETWORK_ALLOW_LIST));
   }
 
   /**
@@ -91,6 +100,7 @@ class OpaPolicyEngine {
           reason: `Policy Deny: Red attack payload is confidential during phase '${sessionPhase}'. Blue cannot inspect payload until CONCLUDE/DISCLOSURE.`
         };
       }
+      return { allowed: true, reason: 'Read of red payload permitted in CONCLUDE/DISCLOSURE phase.' };
     }
 
     // 2. Red trying to read Blue defensive classifier weights or logic
@@ -118,7 +128,12 @@ class OpaPolicyEngine {
       };
     }
 
-    return { allowed: true, reason: 'Request conforms to Information-Flow policy matrix.' };
+    // Default Deny for any unknown or unpermitted requestType
+    return {
+      allowed: false,
+      code: 'E_POLICY_DENIED',
+      reason: `Default Deny: Request type '${requestType}' is not permitted by Information-Flow policy matrix.`
+    };
   }
 }
 

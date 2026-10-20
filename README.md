@@ -13,16 +13,9 @@
 
 [![CI](https://github.com/cyber-anshuman/bayora-secure-ai-safety/actions/workflows/ci.yml/badge.svg)](https://github.com/cyber-anshuman/bayora-secure-ai-safety/actions)
 [![CodeQL](https://github.com/cyber-anshuman/bayora-secure-ai-safety/actions/workflows/codeql.yml/badge.svg)](https://github.com/cyber-anshuman/bayora-secure-ai-safety/actions)
-[![Coverage](https://img.shields.io/badge/Coverage-91.57%25_Stmt_%7C_87%25_Branch-brightgreen.svg)](#4-test-coverage--ci-hardening)
-[![Runtime Isolation](https://img.shields.io/badge/Runtime_Isolation-Enforced-blue.svg)](#3-real-runtime-isolation-unit-tests-section-h-partial)
 [![SBOM](https://img.shields.io/badge/SBOM-CycloneDX_JSON-informational.svg)](sbom.json)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Isolation Tier](https://img.shields.io/badge/Isolation-V8_Threads_%2B_Kata_Target-blue.svg)](#-system-architecture--trust-boundaries)
-[![Network](https://img.shields.io/badge/CNI-Cilium_eBPF_Default--Deny-emerald.svg)](#-system-architecture--trust-boundaries)
-[![PoC Tests](https://img.shields.io/badge/PoC_Tests-9%2F9_Passed-brightgreen.svg)](#1-poc-demonstration-suite-section-s)
-[![Attack Simulations](https://img.shields.io/badge/Attack_Simulations-7%2F7_Mitigated-success.svg)](#2-adversarial-attack-simulations-section-t)
-[![Datasets](https://img.shields.io/badge/Datasets-8_Integrated-purple.svg)](#-integrated-benchmark-datasets--resources)
-[![Node](https://img.shields.io/badge/Node-%3E%3D18.0.0-orange.svg)](package.json)
+[![Node](https://img.shields.io/badge/Node-%3E%3D20.0.0-orange.svg)](package.json)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
 <br/>
@@ -48,6 +41,7 @@
 - [Automated Testing & Adversarial Simulations](#-automated-testing--adversarial-simulations)
 - [REST API Reference](#-rest-api-reference)
 - [Quickstart: Local & Docker Deployment](#-quickstart-local--docker-deployment)
+- [Known Limitations](#-known-limitations)
 - [Residual Risk Analysis (§U)](#-residual-risk-analysis-u)
 - [Repository Structure](#-repository-structure)
 
@@ -385,6 +379,13 @@ curl http://localhost:3000/api/status
 | **Compromised Broker (God-Object)** | Minimal reviewable code + Vault leases | In-process broker vulnerability | Multi-party threshold disclosure logic |
 | **Model Steganographic Output Exfil** | Output schema normalization | Covert token distribution steering | Research-grade model steganography detection |
 
+## ⚠️ Known Limitations
+
+1. **No Real Hypervisor Enforcement**: In this reference implementation, tenant sandboxes execute inside Node.js `worker_threads` with V8 isolate memory limits (`resourceLimits`). Physical Kata Containers microVM isolation is modeled in configuration metadata rather than enforced by a hypervisor.
+2. **No Real Kernel eBPF Enforcement**: Network filtering is evaluated centrally in application logic via `OpaPolicyEngine` rather than kernel-enforced Cilium eBPF network interfaces.
+3. **Scripted Inference Stub**: The inference engine (`DedicatedInferenceWorker`) is a deterministic scripted demonstration stand-in for reproducible evaluation, not an external production GPU LLM server (e.g. vLLM or TGI).
+4. **Anchor Trust Boundaries**: External Merkle root audit anchors are HMAC-signed; their non-repudiation and immutability are only as trustworthy as the external storage and signing keys where they are published.
+
 ---
 
 ## 📂 Repository Structure
@@ -392,7 +393,7 @@ curl http://localhost:3000/api/status
 ```
 bayora-secure-ai-safety/
 ├── .github/
-│   ├── workflows/ci.yml             # GitHub Actions CI matrix (Node 18/20/22)
+│   ├── workflows/ci.yml             # GitHub Actions CI matrix (Node 20/22)
 │   ├── workflows/codeql.yml         # Automated SAST security scanning
 │   ├── ISSUE_TEMPLATE/              # Bug report & security finding templates
 │   └── PULL_REQUEST_TEMPLATE.md     # PR verification checklist
@@ -401,6 +402,7 @@ bayora-secure-ai-safety/
 │   ├── broker/state_machine.js      # 7-phase state machine orchestrator
 │   ├── policy/opa_pdp.js            # OPA Policy Decision Point
 │   ├── security/vault_authority.js  # Ephemeral capability token authority
+│   ├── security/auth.js             # Constant-time API key auth & role enforcement
 │   ├── model/inference_worker.js    # Dedicated worker & canary lifecycle
 │   ├── audit/worm_store.js          # WORM SHA-256 hash chain & Merkle roots
 │   ├── sandboxes/tenant_sandboxes.js# Red & Blue tenant sandboxes
@@ -415,7 +417,8 @@ bayora-secure-ai-safety/
 │   ├── weight_integrity.test.js     # Model weight-integrity unit tests
 │   ├── subsystems_unit.test.js      # Subsystems state machine & guardrail unit tests
 │   ├── worker_isolation.test.js     # Runtime worker_threads memory isolation tests
-│   └── attack_sim_tests.js          # Standalone Section T CLI runner (7 scenarios)
+│   ├── attack_sim_tests.js          # Standalone Section T CLI runner (7 scenarios)
+│   └── http.test.js                 # Comprehensive HTTP integration & regression test suite
 ├── public/
 │   ├── index.html                   # Cyber-defense UI & topology inspector
 │   ├── css/style.css                # Custom glassmorphism design system

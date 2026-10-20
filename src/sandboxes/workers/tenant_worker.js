@@ -2,12 +2,17 @@
  * Bayora Isolated Tenant Worker Execution Thread
  * Runs inside a dedicated worker_thread V8 isolate.
  *
- * Enforces per-tenant memory isolation, private secret state, and nested vm.Context execution.
+ * CRITICAL ARCHITECTURAL BOUNDARY:
+ * These worker threads execute ONLY server-authored code (such as predefined keyword
+ * scanning, cryptographic digest computation, and canned probes) with structured
+ * parameters. They do NOT evaluate arbitrary, untrusted tenant-authored JavaScript,
+ * and are NOT a tenant-code sandbox. True multi-tenant code execution requires
+ * hypervisor-isolated microVMs (e.g. Kata Containers).
  */
 
 const { parentPort, workerData } = require('worker_threads');
 const crypto = require('crypto');
-const vm = require('vm');
+const v8 = require('v8');
 
 // Private module-scoped secret unique to this worker isolate instance.
 // Never exposed on global, never sent back in raw plaintext.
@@ -32,32 +37,35 @@ async function handleTask() {
     }
 
     case 'KEYWORD_SCAN': {
+      // Plain loop without nested vm context (vm is not a security boundary;
+      // timeout is enforced via main-thread timer in worker_isolation.js).
       const text = (task.text || '').toLowerCase();
       const keywords = Array.isArray(task.keywords) ? task.keywords : [];
-
-      // Nested vm context execution with 250ms timeout
-      const sandbox = {
-        text,
-        keywords,
-        flagged: false
-      };
-      const context = vm.createContext(sandbox);
-      const code = `
-        for (const kw of keywords) {
-          if (text.includes(kw.toLowerCase())) {
-            flagged = true;
-            break;
-          }
+      let flagged = false;
+      for (const kw of keywords) {
+        if (text.includes(String(kw || '').toLowerCase())) {
+          flagged = true;
+          break;
         }
-      `;
-      vm.runInContext(code, context, { timeout: 250 });
-      return { flagged: sandbox.flagged };
+      }
+      return { flagged };
     }
 
     case 'PROBE_FOREIGN_SECRET': {
+      // Each worker executes in a fresh, isolated V8 isolate and heap context.
+      // If task.setSecret is provided in test harness, set a secret in this isolate's global.
+      if (task.setSecret) {
+        global.__TENANT_SECRET__ = task.setSecret;
+      }
       return {
         globalLeak: typeof global.__TENANT_SECRET__ !== 'undefined' ? global.__TENANT_SECRET__ : null,
         ownSecretFingerprint: sha256(LOCAL_SECRET)
+      };
+    }
+
+    case 'GET_HEAP_LIMIT': {
+      return {
+        heapSizeLimit: v8.getHeapStatistics().heap_size_limit
       };
     }
 

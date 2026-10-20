@@ -138,21 +138,21 @@
 
                 <!-- Control Plane: OPA PDP, Broker, Vault -->
                 <!-- OPA PDP -->
-                <g class="topo-node" id="nodeOpa" onclick="window.selectTopoNode('opa')" style="cursor: pointer;">
+                <g class="topo-node" id="nodeOpa" data-topo="opa" style="cursor: pointer;">
                   <rect x="35" y="28" width="170" height="46" rx="3" fill="#f4f6fa" stroke="#9eb5d2" stroke-width="1.25"/>
                   <text x="120" y="47" text-anchor="middle" fill="#191c21" font-size="11.5" font-weight="700" font-family="'Inter', sans-serif">OPA POLICY ENGINE</text>
                   <text x="120" y="63" text-anchor="middle" fill="#565d6c" font-size="9" font-family="'Inter', sans-serif">Decision Point (PDP)</text>
                 </g>
 
                 <!-- Broker -->
-                <g class="topo-node" id="nodeBroker" onclick="window.selectTopoNode('broker')" style="cursor: pointer;">
+                <g class="topo-node" id="nodeBroker" data-topo="broker" style="cursor: pointer;">
                   <rect x="255" y="24" width="210" height="54" rx="3" fill="#1f3a60" stroke="#142640" stroke-width="1.5"/>
                   <text x="360" y="46" text-anchor="middle" fill="#ffffff" font-size="12" font-weight="700" font-family="'Inter', sans-serif">BROKER / ORCHESTRATOR</text>
                   <text x="360" y="63" text-anchor="middle" fill="#d9e6f5" font-size="9.5" font-family="'Inter', sans-serif">Mandatory Mediation PEP</text>
                 </g>
 
                 <!-- Vault Authority -->
-                <g class="topo-node" id="nodeVault" onclick="window.selectTopoNode('vault')" style="cursor: pointer;">
+                <g class="topo-node" id="nodeVault" data-topo="vault" style="cursor: pointer;">
                   <rect x="515" y="28" width="170" height="46" rx="3" fill="#fdfaf5" stroke="#dfb987" stroke-width="1.25"/>
                   <text x="600" y="47" text-anchor="middle" fill="#191c21" font-size="11.5" font-weight="700" font-family="'Inter', sans-serif">VAULT AUTHORITY</text>
                   <text x="600" y="63" text-anchor="middle" fill="#565d6c" font-size="9" font-family="'Inter', sans-serif">Capability Token Leases</text>
@@ -160,28 +160,28 @@
 
                 <!-- Workloads: Red, Dedicated Model, Blue -->
                 <!-- Red Sandbox -->
-                <g class="topo-node" id="nodeRed" onclick="window.selectTopoNode('red')" style="cursor: pointer;">
+                <g class="topo-node" id="nodeRed" data-topo="red" style="cursor: pointer;">
                   <rect x="35" y="145" width="170" height="50" rx="3" fill="#fdf5f5" stroke="#a42323" stroke-width="1.5"/>
                   <text x="120" y="166" text-anchor="middle" fill="#731818" font-size="12" font-weight="700" font-family="'Inter', sans-serif">RED SANDBOX</text>
                   <text x="120" y="182" text-anchor="middle" fill="#8f2d2d" font-size="9" font-family="'Inter', sans-serif">worker_thread (Kata target)</text>
                 </g>
 
                 <!-- Dedicated Model (No overlapping elements, single clear label) -->
-                <g class="topo-node" id="nodeModel" onclick="window.selectTopoNode('model')" style="cursor: pointer;">
+                <g class="topo-node" id="nodeModel" data-topo="model" style="cursor: pointer;">
                   <rect x="260" y="145" width="200" height="50" rx="3" fill="#f8f5fb" stroke="#5a4574" stroke-width="1.5"/>
                   <text x="360" y="166" text-anchor="middle" fill="#332244" font-size="12" font-weight="700" font-family="'Inter', sans-serif">DEDICATED MODEL</text>
                   <text x="360" y="182" text-anchor="middle" fill="#4d3663" font-size="9" font-family="'Inter', sans-serif">Isolated Worker (Ephemeral)</text>
                 </g>
 
                 <!-- Blue Sandbox -->
-                <g class="topo-node" id="nodeBlue" onclick="window.selectTopoNode('blue')" style="cursor: pointer;">
+                <g class="topo-node" id="nodeBlue" data-topo="blue" style="cursor: pointer;">
                   <rect x="515" y="145" width="170" height="50" rx="3" fill="#f0f5fa" stroke="#1d4872" stroke-width="1.5"/>
                   <text x="600" y="166" text-anchor="middle" fill="#102e4d" font-size="12" font-weight="700" font-family="'Inter', sans-serif">BLUE SANDBOX</text>
                   <text x="600" y="182" text-anchor="middle" fill="#204b77" font-size="9" font-family="'Inter', sans-serif">worker_thread (Kata target)</text>
                 </g>
 
                 <!-- WORM Audit Store -->
-                <g class="topo-node" id="nodeAudit" onclick="window.selectTopoNode('audit')" style="cursor: pointer;">
+                <g class="topo-node" id="nodeAudit" data-topo="audit" style="cursor: pointer;">
                   <rect x="160" y="295" width="400" height="48" rx="3" fill="#f1f8f3" stroke="#1b663e" stroke-width="1.5"/>
                   <text x="360" y="316" text-anchor="middle" fill="#0f3d24" font-size="12" font-weight="700" font-family="'Inter', sans-serif">WORM AUDIT &amp; PROVENANCE LEDGER</text>
                   <text x="360" y="331" text-anchor="middle" fill="#1e5c38" font-size="9" font-family="'Inter', sans-serif">SHA-256 Hash Chain • Merkle Root Anchoring</text>
@@ -519,7 +519,7 @@
             <p class="attack-desc">Probes direct peer-to-peer connection to Blue sandbox, Cloud Metadata Endpoint (IMDS 169.254.169.254), and host /proc.</p>
             <div class="attack-footer">
               <span class="attack-status" id="statusSim1">Not Run</span>
-              <button class="btn btn-xs btn-outline" onclick="window.runAttackSim('sim-1')">Execute</button>
+              <button class="btn btn-xs btn-outline btn-run-sim" data-sim="sim-1">Execute</button>
             </div>
           </div>
 
@@ -532,7 +532,7 @@
             <p class="attack-desc">Measures response latency variance across one-liner vs complex recursive jailbreaks against 250ms bucketing defense.</p>
             <div class="attack-footer">
               <span class="attack-status" id="statusSim2">Not Run</span>
-              <button class="btn btn-xs btn-outline" onclick="window.runAttackSim('sim-2')">Execute</button>
+              <button class="btn btn-xs btn-outline btn-run-sim" data-sim="sim-2">Execute</button>
             </div>
           </div>
 
@@ -545,7 +545,7 @@
             <p class="attack-desc">Submits identical prompt prefixes across sessions to detect if warm cache timing leaks prior session context.</p>
             <div class="attack-footer">
               <span class="attack-status" id="statusSim3">Not Run</span>
-              <button class="btn btn-xs btn-outline" onclick="window.runAttackSim('sim-3')">Execute</button>
+              <button class="btn btn-xs btn-outline btn-run-sim" data-sim="sim-3">Execute</button>
             </div>
           </div>
 
@@ -558,7 +558,7 @@
             <p class="attack-desc">Compromised Blue sandbox attempts to invoke privileged Auditor audit-export action without requisite capability token.</p>
             <div class="attack-footer">
               <span class="attack-status" id="statusSim4">Not Run</span>
-              <button class="btn btn-xs btn-outline" onclick="window.runAttackSim('sim-4')">Execute</button>
+              <button class="btn btn-xs btn-outline btn-run-sim" data-sim="sim-4">Execute</button>
             </div>
           </div>
 
@@ -571,7 +571,7 @@
             <p class="attack-desc">Adversary modifies a past audit block directly in storage. Tests SHA-256 hash chaining and Merkle root divergence alert.</p>
             <div class="attack-footer">
               <span class="attack-status" id="statusSim5">Not Run</span>
-              <button class="btn btn-xs btn-outline" onclick="window.runAttackSim('sim-5')">Execute</button>
+              <button class="btn btn-xs btn-outline btn-run-sim" data-sim="sim-5">Execute</button>
             </div>
           </div>
 
@@ -584,7 +584,7 @@
             <p class="attack-desc">Injects dirty memory state into worker. Verifies that automated Canary Probe triggers immediate instance destruction.</p>
             <div class="attack-footer">
               <span class="attack-status" id="statusSim6">Not Run</span>
-              <button class="btn btn-xs btn-outline" onclick="window.runAttackSim('sim-6')">Execute</button>
+              <button class="btn btn-xs btn-outline btn-run-sim" data-sim="sim-6">Execute</button>
             </div>
           </div>
 
@@ -597,7 +597,7 @@
             <p class="attack-desc">Simulates inference server crash mid-stream. Verifies finding is downgraded to INFRA_FAILURE rather than false jailbreak.</p>
             <div class="attack-footer">
               <span class="attack-status" id="statusSim7">Not Run</span>
-              <button class="btn btn-xs btn-outline" onclick="window.runAttackSim('sim-7')">Execute</button>
+              <button class="btn btn-xs btn-outline btn-run-sim" data-sim="sim-7">Execute</button>
             </div>
           </div>
         </div>
@@ -606,7 +606,7 @@
         <div class="attack-terminal">
           <div class="terminal-header">
             <span>TERMINAL: Adversarial Execution & Policy Enforcement Log</span>
-            <button class="btn-clear" onclick="document.getElementById('terminalBody').innerHTML = ''">Clear</button>
+            <button class="btn-clear" id="btnClearTerminal">Clear</button>
           </div>
           <div class="terminal-body mono" id="terminalBody">
             <span class="term-line info">[INIT] Bayora Adversarial Simulation Lab ready. Select a simulation above or click 'Run All'.</span>

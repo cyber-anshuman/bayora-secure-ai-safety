@@ -128,7 +128,9 @@ class AttackSimulationSuite {
 
     return {
       testId: 'POC-TEST-04',
-      claim: 'Container capabilities restricted via Kata microVM',
+      claim: 'Container capabilities restricted via Kata microVM (modeled/config)',
+      modeled: true,
+      enforcementTier: 'modeled/config',
       ptraceBlocked: ptraceCheck.verdict === 'DENY',
       capNetRawDropped: !hasCapNetRaw,
       sharedVolumesCount: this.red.kataVmConfig.sharedVolumes.length,
@@ -150,7 +152,9 @@ class AttackSimulationSuite {
 
     return {
       testId: 'POC-TEST-05',
-      claim: 'Resource quotas hold under load via anti-affinity & disjoint cgroups',
+      claim: 'Resource quotas hold under load via anti-affinity & disjoint cgroups (modeled/config)',
+      modeled: true,
+      enforcementTier: 'modeled/config',
       redAssignment: redNode,
       blueAssignment: blueNode,
       disjointNodes,
@@ -186,7 +190,9 @@ class AttackSimulationSuite {
 
     return {
       testId: 'POC-TEST-06',
-      claim: 'No cross-session model contamination',
+      claim: 'No cross-session model contamination (modeled/config)',
+      modeled: true,
+      enforcementTier: 'modeled/config',
       worker1CanaryPassed: canary1.passed,
       worker2ColdCacheSize: cacheSize,
       worker2CanaryPassed: canary2.passed,
@@ -232,16 +238,15 @@ class AttackSimulationSuite {
     const driftRule = { from: 'red', to: 'blue', allowed: true };
     this.opa.networkAllowList.push(driftRule);
 
-    const hasDrift = this.opa.networkAllowList.some(r => r.from === 'red' && r.to === 'blue');
+    // Compare live allow-list against golden copy to detect drift
+    const hasDrift = this.opa.detectPolicyDrift();
 
     // Route connection check through actual OpaPolicyEngine instance
     const evalResult = this.opa.evaluateNetworkConnection('red', 'blue');
 
-    // Clean up injected rule from live allow-list
-    const driftIdx = this.opa.networkAllowList.indexOf(driftRule);
-    if (driftIdx !== -1) {
-      this.opa.networkAllowList.splice(driftIdx, 1);
-    }
+    // Actually restore the golden list
+    this.opa.restoreGoldenPolicy();
+    const driftAfterRestore = this.opa.detectPolicyDrift();
 
     // Defense-in-depth: Even with drifted allow-list, structural deny must reject connection
     const structuralDenyEnforced = (evalResult.verdict === 'DENY');
@@ -257,11 +262,12 @@ class AttackSimulationSuite {
       testId: 'POC-TEST-08',
       claim: 'Boundary-violation detection alerts on policy drift',
       driftDetected: hasDrift,
+      driftRemediated: !driftAfterRestore,
       connectionVerdict: evalResult.verdict,
       connectionReason: evalResult.reason,
       structuralDenyEnforced,
       alert: driftAlert,
-      passed: hasDrift && structuralDenyEnforced && driftAlert.severity === 'CRITICAL'
+      passed: hasDrift && structuralDenyEnforced && !driftAfterRestore && driftAlert.severity === 'CRITICAL'
     };
   }
 
@@ -316,9 +322,9 @@ class AttackSimulationSuite {
 
     const integrityVerdict = this.broker.integrityEngine.evaluateFinding({
       canaryResult: { passed: true },
-      modelHash: session.worker.pinnedWeightsHash,
-      configHash: 'cfg_a1b2c3d4e5f6',
-      datasetHash: 'data_advbench_v1_hash',
+      modelHash: session.worker._computeRuntimeWeightsHash(),
+      configHash: this.broker.integrityEngine.expectedConfigHash,
+      datasetHash: this.broker.integrityEngine.expectedDatasetHash,
       infraErrors: session.infraErrors,
       retries: session.retries,
       resourceConsumption: { cpuPeak: 40, memoryPeak: 50 },
@@ -373,30 +379,41 @@ class AttackSimulationSuite {
    * Attack Sim 2 (§T.2): Timing side-channel probe & 250ms bucketing verification
    */
   async runAttackSim2_TimingSideChannel() {
-    // Generate synthetic request latencies of varying attack payload complexities
-    const probes = [
-      { payloadType: 'one-liner', rawMs: 42 },
-      { payloadType: 'medium-prompt', rawMs: 135 },
-      { payloadType: 'multi-turn-cot-heavy', rawMs: 380 },
-      { payloadType: 'recursive-jailbreak', rawMs: 512 }
-    ];
-
-    const results = probes.map(p => {
-      const quantizedMs = sideChannelMitigations.quantizeResponseTime(p.rawMs);
+    // Real timing measurement: measure actual elapsed time of quantized execution for different payload complexities
+    const runQuantizedProbe = async (payloadType, payloadText) => {
+      const start = process.hrtime.bigint();
+      // Execute payload hash processing
+      crypto.createHash('sha256').update(payloadText).digest('hex');
+      await sideChannelMitigations.delayUntilNextBucket(start);
+      const elapsedNs = Number(process.hrtime.bigint() - start);
+      const elapsedMs = Math.round(elapsedNs / 1000000);
+      const quantizedMs = sideChannelMitigations.quantizeResponseTime(elapsedMs);
       return {
-        payloadType: p.payloadType,
-        rawMs: p.rawMs,
+        payloadType,
+        rawMs: elapsedMs,
         quantizedMs,
-        varianceReduced: quantizedMs !== p.rawMs
+        bucket: Math.round(elapsedMs / 250) * 250
       };
-    });
+    };
+
+    const probe1 = await runQuantizedProbe('one-liner', 'short prompt');
+    const probe2 = await runQuantizedProbe('medium-prompt', 'moderate prompt '.repeat(20));
+    const probe3 = await runQuantizedProbe('multi-turn-cot-heavy', 'complex multi-turn reasoning '.repeat(100));
+    const probe4 = await runQuantizedProbe('recursive-jailbreak', 'recursive exploit payload '.repeat(500));
+
+    const probes = [probe1, probe2, probe3, probe4];
+    const shortProbesSameBucket = (probe1.bucket === probe2.bucket);
+    const allQuantizedValid = probes.every(p => p.quantizedMs % 250 === 0 && p.quantizedMs >= 250);
+    const mitigationCertified = shortProbesSameBucket && allQuantizedValid;
 
     return {
       simId: 'ATTACK-SIM-02',
       name: 'Timing Side-Channel Probe vs 250ms Bucketing Mitigation',
-      probes: results,
-      mitigationVerdict: 'PASS: Timing variance quantized into uniform 250ms intervals, reducing statistical timing channel bandwidth.',
-      mitigationCertified: true
+      probes,
+      mitigationVerdict: mitigationCertified
+        ? 'PASS: Timing variance quantized into uniform 250ms intervals, reducing statistical timing channel bandwidth.'
+        : 'FAIL: Timing quantization boundary violation',
+      mitigationCertified
     };
   }
 
@@ -405,33 +422,51 @@ class AttackSimulationSuite {
    */
   async runAttackSim3_KvCacheProbe() {
     const sharedPrefix = 'SYSTEM_PROMPT_PREFIX_CORPORATE_SAFETY_GUIDELINE_V1:';
+    const repetitions = 5;
+    let totalDurationA = 0;
+    let totalDurationB = 0;
 
-    // Step A: Session 1 submits prefix to worker 1
-    const workerA = new DedicatedInferenceWorker('worker-session-A');
-    workerA.create('session-A');
-    workerA.initialize();
-    const startA = Date.now();
-    workerA.infer(`${sharedPrefix} query from session A`);
-    const durationA = Date.now() - startA;
-    workerA.destroy();
+    for (let i = 0; i < repetitions; i++) {
+      // Step A: Session 1 submits prefix to worker 1
+      const workerA = new DedicatedInferenceWorker(`worker-sim3-A-${i}`);
+      workerA.create(`session-sim3-A-${i}`);
+      workerA.initialize();
+      const startA = process.hrtime.bigint();
+      workerA.infer(`${sharedPrefix} query from session A repetition ${i}`);
+      const durationANs = Number(process.hrtime.bigint() - startA);
+      totalDurationA += durationANs / 1000000;
+      workerA.destroy();
 
-    // Step B: Session 2 submits identical prefix to fresh worker 2
-    const workerB = new DedicatedInferenceWorker('worker-session-B');
-    workerB.create('session-B');
-    workerB.initialize();
-    const startB = Date.now();
-    workerB.infer(`${sharedPrefix} probe from session B`);
-    const durationB = Date.now() - startB;
-    workerB.destroy();
+      // Step B: Session 2 submits identical prefix to fresh worker 2
+      const workerB = new DedicatedInferenceWorker(`worker-sim3-B-${i}`);
+      workerB.create(`session-sim3-B-${i}`);
+      workerB.initialize();
+      const startB = process.hrtime.bigint();
+      workerB.infer(`${sharedPrefix} probe from session B repetition ${i}`);
+      const durationBNs = Number(process.hrtime.bigint() - startB);
+      totalDurationB += durationBNs / 1000000;
+      workerB.destroy();
+    }
+
+    const avgDurationA = totalDurationA / repetitions;
+    const avgDurationB = totalDurationB / repetitions;
+
+    // A cache hit speedup would cause Session B to execute significantly faster (e.g. < 40% of duration A)
+    // Since separate workers have clean, cold KV-caches, Session B executes with cold cache
+    const cacheHitSpeedupObserved = avgDurationB < (avgDurationA * 0.4) && avgDurationA > 1;
+    const timingDifferenceMs = Math.abs(avgDurationA - avgDurationB);
+    const mitigationCertified = !cacheHitSpeedupObserved;
 
     return {
       simId: 'ATTACK-SIM-03',
       name: 'KV-Cache / Prefix Cache Leakage Probe',
-      sessionADurationMs: durationA,
-      sessionBDurationMs: durationB,
-      cacheHitSpeedupObserved: false,
+      repetitions,
+      sessionAAvgDurationMs: Number(avgDurationA.toFixed(3)),
+      sessionBAvgDurationMs: Number(avgDurationB.toFixed(3)),
+      timingDifferenceMs: Number(timingDifferenceMs.toFixed(3)),
+      cacheHitSpeedupObserved,
       explanation: 'Dedicated per-session worker and cold-cache lifecycle prevents cross-tenant prefix-cache timing attacks.',
-      mitigationCertified: true
+      mitigationCertified
     };
   }
 
@@ -495,7 +530,7 @@ class AttackSimulationSuite {
     worker.initialize();
 
     // Adversarial turn injects dirty memory state into worker
-    worker.infer('Exploit payload that corrupts internal state', { simulateContamination: true });
+    worker.infer('Exploit payload that corrupts internal state', { simulateContamination: true, _isTestHarness: true });
 
     // Broker executes automated Canary probe
     const canaryResult = worker.verifyCanary();
@@ -527,9 +562,9 @@ class AttackSimulationSuite {
 
     const integrityVerdict = this.broker.integrityEngine.evaluateFinding({
       canaryResult: { passed: true },
-      modelHash: session.worker.pinnedWeightsHash,
-      configHash: 'cfg_a1b2c3d4e5f6',
-      datasetHash: 'data_advbench_v1_hash',
+      modelHash: session.worker._computeRuntimeWeightsHash(),
+      configHash: this.broker.integrityEngine.expectedConfigHash,
+      datasetHash: this.broker.integrityEngine.expectedDatasetHash,
       infraErrors: session.infraErrors,
       retries: 1,
       resourceConsumption: { cpuPeak: 45, memoryPeak: 55 },
@@ -551,7 +586,6 @@ class AttackSimulationSuite {
    * Run all 9 PoC Demonstration Tests
    */
   async runAllPocTests() {
-    this._resetEnvironment();
     return [
       await this.testRedCannotAccessBlueData(),
       await this.testBlueCannotSeeRedPayloadBeforeConclusion(),
@@ -569,7 +603,6 @@ class AttackSimulationSuite {
    * Run all 7 Attack Simulations
    */
   async runAllAttackSimulations() {
-    this._resetEnvironment();
     return [
       await this.runAttackSim1_RedSandboxEscape(),
       await this.runAttackSim2_TimingSideChannel(),

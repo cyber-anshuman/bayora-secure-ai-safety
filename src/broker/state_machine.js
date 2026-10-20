@@ -19,13 +19,87 @@ class BrokerStateMachine {
 
     // Map of active sessions: sessionId -> SessionState
     this.sessions = new Map();
+    this.sessionTtlMs = Number(process.env.SESSION_TTL_MS) || (60 * 60 * 1000); // 1 hour default
+    this.maxSessions = Number(process.env.MAX_SESSIONS) || 500;
+    this.maxAuditEntries = Number(process.env.MAX_AUDIT_ENTRIES) || 10000;
+    this.auditWarningThreshold = Math.floor(this.maxAuditEntries * 0.8);
+
+    this.evictionInterval = setInterval(() => {
+      this.evictExpiredSessions();
+    }, 60 * 1000);
+    if (this.evictionInterval && typeof this.evictionInterval.unref === 'function') {
+      this.evictionInterval.unref();
+    }
+  }
+
+  /**
+   * Evict sessions that have exceeded SESSION_TTL_MS, destroying their workers.
+   */
+  evictExpiredSessions() {
+    const now = Date.now();
+    for (const [sessionId, session] of this.sessions.entries()) {
+      const createdTime = typeof session.createdAt === 'number'
+        ? session.createdAt
+        : (new Date(session.createdAt).getTime() || 0);
+      if (now - createdTime > this.sessionTtlMs) {
+        if (session.worker && typeof session.worker.destroy === 'function') {
+          try { session.worker.destroy(); } catch (e) {}
+        }
+        this.sessions.delete(sessionId);
+        try {
+          this.audit.append({
+            sessionId,
+            tenant: 'SYSTEM',
+            actor: 'session-reaper',
+            eventType: 'STATE_TRANSITION',
+            payload: { from: session.phase, to: 'EXPIRED' },
+            details: { reason: 'SESSION_TTL_EXPIRED' }
+          });
+        } catch (e) {}
+      }
+    }
   }
 
   /**
    * STEP 1: SETUP
    * Initializes a fresh session with non-monotonic UUIDs and dedicated worker.
    */
-  async createSession(disclosurePolicy = 'REDACTED_DEFENSE') {
+  async createSession(disclosurePolicy = 'REDACTED_DEFENSE', creatorRole = 'broker') {
+    this.evictExpiredSessions();
+
+    if (this.sessions.size >= this.maxSessions) {
+      const err = new Error(`MAX_SESSIONS_EXCEEDED: Active sessions limit of ${this.maxSessions} reached`);
+      err.code = 'E_MAX_SESSIONS_EXCEEDED';
+      err.statusCode = 503;
+      throw err;
+    }
+
+    if (this.audit && this.audit.chain) {
+      if (this.audit.chain.length >= this.maxAuditEntries) {
+        const err = new Error(`MAX_AUDIT_ENTRIES_EXCEEDED: Audit ledger capacity of ${this.maxAuditEntries} reached. Rejecting new session to prevent evidentiary loss.`);
+        err.code = 'E_AUDIT_CAPACITY_EXCEEDED';
+        err.statusCode = 503;
+        throw err;
+      }
+      if (this.audit.chain.length >= this.auditWarningThreshold) {
+        console.warn(`[AUDIT WARNING]: WORM audit chain length (${this.audit.chain.length}) has reached ${Math.round((this.audit.chain.length / this.maxAuditEntries) * 100)}% of MAX_AUDIT_ENTRIES (${this.maxAuditEntries}).`);
+      }
+    }
+
+    const ALLOWED_POLICIES = ['REDACTED_DEFENSE', 'FULL_BENCHMARK', 'COARSE_STATUS'];
+    if (!ALLOWED_POLICIES.includes(disclosurePolicy)) {
+      const err = new Error(`Invalid disclosure policy '${disclosurePolicy}'. Allowed: ${ALLOWED_POLICIES.join(', ')}`);
+      err.code = 'E_INVALID_DISCLOSURE_POLICY';
+      err.statusCode = 400;
+      throw err;
+    }
+    if (disclosurePolicy === 'FULL_BENCHMARK' && creatorRole !== 'admin' && creatorRole !== 'broker') {
+      const err = new Error("Forbidden: Only admin or broker role may select 'FULL_BENCHMARK' disclosure policy");
+      err.code = 'E_FORBIDDEN';
+      err.statusCode = 403;
+      throw err;
+    }
+
     // Generate UUIDv4 to avoid monotonic counter leakage (§X)
     const sessionId = `sess_${crypto.randomUUID()}`;
     const startTime = Date.now();
@@ -59,7 +133,7 @@ class BrokerStateMachine {
       integrityVerdict: null,
       infraErrors: [],
       retries: 0,
-      resourceConsumption: { cpuPeak: 42, memoryPeak: 55 },
+      resourceConsumption: { cpuPeak: 0, memoryPeak: 0, simulated: false },
       tokens: { redToken, blueToken },
       createdAt: new Date().toISOString()
     };
@@ -88,22 +162,49 @@ class BrokerStateMachine {
   }
 
   /**
+   * Shared disclosure redaction policy filter (§F)
+   */
+  applyDisclosureRedaction(redPayload, disclosurePolicy) {
+    if (!redPayload) return null;
+    if (disclosurePolicy === 'FULL_BENCHMARK') {
+      return redPayload;
+    }
+    if (disclosurePolicy === 'REDACTED_DEFENSE') {
+      return `[REDACTED_ATTACK_CATEGORY_JAILBREAK: length=${redPayload.length}]`;
+    }
+    if (disclosurePolicy === 'COARSE_STATUS') {
+      return '[SUMMARY_ONLY]';
+    }
+    return '[SUMMARY_ONLY]';
+  }
+
+  /**
    * STEP 2: RED_TURN
    * Accepts attack payload from Red sandbox verified via capability token.
+   * Returns only { sessionId, phase: 'ACCEPTED' } to Red.
    */
   async processRedTurn(sessionId, payloadText, token) {
     const session = this.sessions.get(sessionId);
-    if (!session) throw new Error('E_SESSION_NOT_FOUND');
+    if (!session) {
+      const err = new Error('E_SESSION_NOT_FOUND');
+      err.code = 'E_SESSION_NOT_FOUND';
+      throw err;
+    }
 
     if (session.phase !== 'RED_TURN') {
-      throw new Error(`State Machine Error: Cannot process RED_TURN while in phase '${session.phase}'`);
+      const err = new Error(`State Machine Error: Cannot process RED_TURN while in phase '${session.phase}'`);
+      err.code = 'E_STATE_MACHINE_ERROR';
+      throw err;
     }
 
     // Capability check via Vault (§J)
-    const capCheck = this.vault.validateCapability(token, 'submit_attack', sessionId);
+    const capCheck = this.vault.validateCapability(token, 'submit_attack', sessionId, 'red');
     if (!capCheck.valid) {
-      throw new Error(`Vault Deny: ${capCheck.reason}`);
+      const err = new Error(`Vault Deny: ${capCheck.reason}`);
+      err.code = 'E_AUTH_FAILED';
+      throw err;
     }
+    this.vault.consumeAction(token, 'submit_attack');
 
     session.redPayload = payloadText;
     session.phase = 'MODEL_INFERENCE';
@@ -118,7 +219,13 @@ class BrokerStateMachine {
     });
 
     // Automatically trigger model inference
-    return await this._executeModelInference(sessionId);
+    await this._executeModelInference(sessionId);
+
+    // Red receives only coarse acceptance; verdict and timing details are hidden
+    return {
+      sessionId,
+      phase: 'ACCEPTED'
+    };
   }
 
   /**
@@ -130,23 +237,40 @@ class BrokerStateMachine {
     const startTs = Date.now();
 
     try {
-      // 1. Run inference on isolated worker
-      const inferResult = session.worker.infer(session.redPayload, options);
+      // 1. Run inference on isolated worker (ignore client options to prevent contamination injection)
+      const inferResult = session.worker.infer(session.redPayload);
       session.modelResponse = inferResult;
 
       // 2. Automated Canary Probe Verification (§K)
       const canaryCheck = session.worker.verifyCanary();
 
+      // Measure real runtime resource consumption
+      const mem = process.memoryUsage();
+      const memPct = Math.min(100, Math.round((mem.heapUsed / mem.heapTotal) * 100));
+      const cpu = process.cpuUsage();
+      const cpuPct = Math.min(100, Math.round(((cpu.user + cpu.system) / 1000000) % 100));
+      session.resourceConsumption = {
+        cpuPeak: Math.max(1, cpuPct),
+        memoryPeak: Math.max(1, memPct),
+        simulated: false
+      };
+
+      // Compute auditReconstructable: session entries exist and chain is valid
+      const sessionEntries = this.audit.chain.filter(e => e.sessionId === sessionId);
+      const hasRequestEntry = sessionEntries.some(e => e.tenant === 'red' || (e.payload && e.payload.from === 'RED_TURN'));
+      const chainValid = this.audit.verifyIntegrity().isValid;
+      const auditReconstructable = hasRequestEntry && chainValid;
+
       // 3. Evaluation Integrity check (§L)
       const integrityVerdict = this.integrityEngine.evaluateFinding({
         canaryResult: canaryCheck,
-        modelHash: session.worker.pinnedWeightsHash,
-        configHash: 'cfg_a1b2c3d4e5f6',
-        datasetHash: 'data_advbench_v1_hash',
+        modelHash: session.worker._computeRuntimeWeightsHash(),
+        configHash: this.integrityEngine.expectedConfigHash,
+        datasetHash: this.integrityEngine.expectedDatasetHash,
         infraErrors: session.infraErrors,
         retries: session.retries,
         resourceConsumption: session.resourceConsumption,
-        auditReconstructable: true,
+        auditReconstructable,
         rawFinding: inferResult
       });
 
@@ -175,6 +299,9 @@ class BrokerStateMachine {
     } catch (err) {
       session.infraErrors.push(err.message);
       session.phase = 'INFRA_FAILURE';
+      if (session.worker && typeof session.worker.destroy === 'function') {
+        try { session.worker.destroy(); } catch (e) {}
+      }
       this.audit.append({
         sessionId,
         tenant: 'SYSTEM',
@@ -188,23 +315,62 @@ class BrokerStateMachine {
   }
 
   /**
+   * Blue inspects normalized model output from the broker during BLUE_TURN
+   */
+  getModelOutput(sessionId) {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      const err = new Error('E_SESSION_NOT_FOUND');
+      err.code = 'E_SESSION_NOT_FOUND';
+      throw err;
+    }
+
+    if (session.phase !== 'BLUE_TURN') {
+      const err = new Error(`State Machine Error: Cannot inspect model output while in phase '${session.phase}'`);
+      err.code = 'E_STATE_MACHINE_ERROR';
+      throw err;
+    }
+
+    return {
+      sessionId,
+      phase: session.phase,
+      modelOutput: session.modelResponse ? session.modelResponse.rawOutput : null
+    };
+  }
+
+  /**
    * STEP 5: BLUE_TURN
    * Blue sandbox evaluates defense on filtered model response.
    */
-  async processBlueTurn(sessionId, blueVerdict, token) {
+  async processBlueTurn(sessionId, blueVerdictOrParams, token) {
     const session = this.sessions.get(sessionId);
-    if (!session) throw new Error('E_SESSION_NOT_FOUND');
+    if (!session) {
+      const err = new Error('E_SESSION_NOT_FOUND');
+      err.code = 'E_SESSION_NOT_FOUND';
+      throw err;
+    }
 
     if (session.phase !== 'BLUE_TURN') {
-      throw new Error(`State Machine Error: Cannot process BLUE_TURN while in phase '${session.phase}'`);
+      const err = new Error(`State Machine Error: Cannot process BLUE_TURN while in phase '${session.phase}'`);
+      err.code = 'E_STATE_MACHINE_ERROR';
+      throw err;
     }
 
-    const capCheck = this.vault.validateCapability(token, 'submit_defense', sessionId);
+    const capCheck = this.vault.validateCapability(token, 'submit_defense', sessionId, 'blue');
     if (!capCheck.valid) {
-      throw new Error(`Vault Deny: ${capCheck.reason}`);
+      const err = new Error(`Vault Deny: ${capCheck.reason}`);
+      err.code = 'E_AUTH_FAILED';
+      throw err;
+    }
+    this.vault.consumeAction(token, 'submit_defense');
+
+    let blueEvaluation = blueVerdictOrParams;
+    if (typeof blueVerdictOrParams === 'object' && blueVerdictOrParams !== null) {
+      const { modelOutput: _ignored, ...sanitized } = blueVerdictOrParams;
+      blueEvaluation = sanitized;
     }
 
-    session.blueEvaluation = blueVerdict;
+    session.blueEvaluation = blueEvaluation;
     session.phase = 'CONCLUDE';
 
     // Step 5 of lifecycle: DESTROY the inference worker instance (§K)
@@ -216,7 +382,7 @@ class BrokerStateMachine {
       actor: 'blue-sandbox',
       eventType: 'STATE_TRANSITION',
       payload: { from: 'BLUE_TURN', to: 'CONCLUDE' },
-      details: { blueVerdict: blueVerdict.defenseVerdict }
+      details: { blueVerdict: blueEvaluation ? blueEvaluation.defenseVerdict : 'UNSPECIFIED' }
     });
 
     return {
@@ -233,7 +399,25 @@ class BrokerStateMachine {
    */
   async getDisclosureBundle(sessionId, token) {
     const session = this.sessions.get(sessionId);
-    if (!session) throw new Error('E_SESSION_NOT_FOUND');
+    if (!session) {
+      const err = new Error('E_SESSION_NOT_FOUND');
+      err.code = 'E_SESSION_NOT_FOUND';
+      throw err;
+    }
+
+    if (!token) {
+      const err = new Error('Vault Deny: TOKEN_MISSING');
+      err.code = 'E_AUTH_FAILED';
+      throw err;
+    }
+
+    const capCheck = this.vault.validateCapability(token, 'read_disclosure', sessionId, 'blue');
+    if (!capCheck.valid) {
+      const err = new Error(`Vault Deny: ${capCheck.reason}`);
+      err.code = 'E_AUTH_FAILED';
+      throw err;
+    }
+    this.vault.consumeAction(token, 'read_disclosure');
 
     // Check OPA information flow policy
     const policyCheck = this.opa.evaluateInformationFlow({
@@ -245,22 +429,16 @@ class BrokerStateMachine {
     });
 
     if (!policyCheck.allowed) {
-      throw new Error(`OPA Deny: ${policyCheck.reason}`);
+      const err = new Error(`OPA Deny: ${policyCheck.reason}`);
+      err.code = 'E_POLICY_DENIED';
+      throw err;
     }
 
     // Advance to final state DISCLOSURE
     session.phase = 'DISCLOSURE';
 
-    // Apply redaction based on policy (§F)
-    let payloadForBlue = null;
-    if (session.disclosurePolicy === 'FULL_BENCHMARK') {
-      payloadForBlue = session.redPayload;
-    } else if (session.disclosurePolicy === 'REDACTED_DEFENSE') {
-      // Redact specific sensitive exploit mechanics
-      payloadForBlue = session.redPayload ? `[REDACTED_ATTACK_CATEGORY_JAILBREAK: length=${session.redPayload.length}]` : null;
-    } else {
-      payloadForBlue = '[SUMMARY_ONLY]';
-    }
+    // Apply shared redaction based on policy (§F)
+    const payloadForBlue = this.applyDisclosureRedaction(session.redPayload, session.disclosurePolicy);
 
     const bundle = {
       sessionId,
@@ -279,7 +457,7 @@ class BrokerStateMachine {
       actor: 'broker-orchestrator',
       eventType: 'DISCLOSURE_BUNDLE_RELEASED',
       payload: { sessionId, policy: session.disclosurePolicy },
-      details: { disclosedTo: 'blue', integrityCertified: session.integrityVerdict.certified }
+      details: { disclosedTo: 'blue', integrityCertified: session.integrityVerdict ? session.integrityVerdict.certified : false }
     });
 
     return bundle;
@@ -288,10 +466,34 @@ class BrokerStateMachine {
   /**
    * Information Flow Enforcement Check:
    * Blue attempts to query Red payload during an unauthorized phase.
+   * Requires a valid blue token. After CONCLUDE returns redacted value according to disclosurePolicy.
    */
   queryRedPayload(sessionId, token) {
     const session = this.sessions.get(sessionId);
-    if (!session) throw new Error('E_SESSION_NOT_FOUND');
+    if (!session) {
+      const err = new Error('E_SESSION_NOT_FOUND');
+      err.code = 'E_SESSION_NOT_FOUND';
+      throw err;
+    }
+
+    if (!token) {
+      return {
+        allowed: false,
+        code: 'E_AUTH_FAILED',
+        reason: 'Vault Deny: TOKEN_MISSING',
+        currentPhase: session.phase
+      };
+    }
+
+    const capCheck = this.vault.validateCapability(token, 'read_disclosure', sessionId, 'blue');
+    if (!capCheck.valid) {
+      return {
+        allowed: false,
+        code: 'E_AUTH_FAILED',
+        reason: `Vault Deny: ${capCheck.reason}`,
+        currentPhase: session.phase
+      };
+    }
 
     const flowEval = this.opa.evaluateInformationFlow({
       source: 'red',
@@ -311,7 +513,7 @@ class BrokerStateMachine {
 
     return {
       allowed: true,
-      payload: session.redPayload
+      payload: this.applyDisclosureRedaction(session.redPayload, session.disclosurePolicy)
     };
   }
 

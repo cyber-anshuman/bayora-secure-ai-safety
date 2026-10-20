@@ -20,7 +20,7 @@ async function runSubsystemsUnitTests() {
   // =========================================================================
   // 1. VaultAuthority Branch & Guardrail Tests
   // =========================================================================
-  const vault = new VaultAuthority('TEST_VAULT_SECRET_KEY_123');
+  const vault = new VaultAuthority('TEST_VAULT_SECRET_KEY_12345678901234567890');
 
   // 1a. Missing token parameters in issueToken
   assert.throws(() => {
@@ -54,7 +54,7 @@ async function runSubsystemsUnitTests() {
   vault.revokeToken(tokenToRevoke.tokenId);
   assert.deepStrictEqual(vault.validateCapability(tokenToRevoke, 'submit_attack', 'sess_revoke_test'), {
     valid: false,
-    reason: 'TOKEN_REVOKED'
+    reason: 'TOKEN_NOT_ACTIVE: Token is not active or has already been consumed'
   });
 
   // 1d. Validate capability: invalid signature (tampered token)
@@ -63,7 +63,7 @@ async function runSubsystemsUnitTests() {
     sessionId: 'sess_tamper_test',
     allowedActions: ['submit_attack']
   });
-  const tamperedToken = { ...validToken, signature: 'deadbeef00112233' };
+  const tamperedToken = { ...validToken, signature: 'deadbeef00112233deadbeef00112233deadbeef00112233deadbeef00112233' };
   assert.deepStrictEqual(vault.validateCapability(tamperedToken, 'submit_attack', 'sess_tamper_test'), {
     valid: false,
     reason: 'INVALID_SIGNATURE'
@@ -72,10 +72,12 @@ async function runSubsystemsUnitTests() {
   // 1e. Validate capability: expired token
   const expiredToken = {
     ...validToken,
+    tokenId: 'tok_expired_unique_id',
     expiresAt: Date.now() - 5000,
     signature: ''
   };
   expiredToken.signature = vault._sign(expiredToken);
+  vault.activeTokens.set(expiredToken.tokenId, { ...expiredToken, consumedActions: new Set() });
   assert.deepStrictEqual(vault.validateCapability(expiredToken, 'submit_attack', 'sess_tamper_test'), {
     valid: false,
     reason: 'TOKEN_EXPIRED'
@@ -93,14 +95,48 @@ async function runSubsystemsUnitTests() {
     reason: "UNAUTHORIZED_CAPABILITY: Missing required action 'unauthorized_action'"
   });
 
-  // 1h. Validate capability: wildcard permission '*'
+  // 1h. Validate capability: wildcard permission '*' must be rejected
   const wildcardToken = vault.issueToken({
     tenantId: 'admin',
     sessionId: 'sess_wildcard',
     allowedActions: ['*']
   });
   const wildCheck = vault.validateCapability(wildcardToken, 'any_action_allowed', 'sess_wildcard');
-  assert.strictEqual(wildCheck.valid, true);
+  assert.strictEqual(wildCheck.valid, false);
+  assert(/WILDCARD_ACTION_PROHIBITED/.test(wildCheck.reason));
+
+  // 1i. Token forged with old default secret must be rejected
+  const cryptoMod = require('crypto');
+  const oldSecretToken = {
+    tokenId: 'tok_forged_old_secret',
+    tenantId: 'red',
+    sessionId: 'sess_forged',
+    allowedActions: ['submit_attack'],
+    issuedAt: Date.now(),
+    expiresAt: Date.now() + 60000
+  };
+  const oldActions = oldSecretToken.allowedActions.sort().join(',');
+  const oldData = `${oldSecretToken.tokenId}:${oldSecretToken.tenantId}:${oldSecretToken.sessionId}:${oldActions}:${oldSecretToken.issuedAt}:${oldSecretToken.expiresAt}`;
+  oldSecretToken.signature = cryptoMod.createHmac('sha256', 'BAYORA_VAULT_MASTER_SECRET').update(oldData).digest('hex');
+  const forgedCheck = vault.validateCapability(oldSecretToken, 'submit_attack', 'sess_forged', 'red');
+  assert.strictEqual(forgedCheck.valid, false);
+
+  // 1j. Single-use token per action: replaying consumed action must be rejected
+  const singleUseToken = vault.issueToken({
+    tenantId: 'red',
+    sessionId: 'sess_single_use',
+    allowedActions: ['submit_attack']
+  });
+  const firstUse = vault.validateCapability(singleUseToken, 'submit_attack', 'sess_single_use', 'red');
+  assert.strictEqual(firstUse.valid, true);
+  vault.consumeAction(singleUseToken, 'submit_attack');
+  const secondUse = vault.validateCapability(singleUseToken, 'submit_attack', 'sess_single_use', 'red');
+  assert.strictEqual(secondUse.valid, false, 'Replaying consumed action must be rejected');
+
+  // 1k. Tenant binding: token with tenant red checked against tenant blue must be rejected
+  const tenantCheck = vault.validateCapability(validToken, 'submit_attack', 'sess_tamper_test', 'blue');
+  assert.strictEqual(tenantCheck.valid, false);
+  assert(/TENANT_MISMATCH/.test(tenantCheck.reason));
 
   console.log('✓ VaultAuthority branch tests passed cleanly.');
 
@@ -198,9 +234,10 @@ async function runSubsystemsUnitTests() {
     'processRedTurn must reject with Vault Deny on invalid token'
   );
 
-  // 3f. Complete Red turn legitimately -> advances to BLUE_TURN
+  // 3f. Complete Red turn legitimately -> returns phase: 'ACCEPTED' to Red, session advances to BLUE_TURN
   const redResult = await broker.processRedTurn(sess1Id, 'exploit_probe', sessionData1.redToken);
-  assert.strictEqual(redResult.phase, 'BLUE_TURN');
+  assert.strictEqual(redResult.phase, 'ACCEPTED');
+  assert.strictEqual(broker.sessions.get(sess1Id).phase, 'BLUE_TURN');
 
   // 3g. Double-submitting Red turn when already in BLUE_TURN
   await assert.rejects(
@@ -251,12 +288,19 @@ async function runSubsystemsUnitTests() {
   const bundleFull = await broker.getDisclosureBundle(sessionFull.sessionId, sessionFull.blueToken);
   assert.strictEqual(bundleFull.disclosedAttackPayload, 'full_unredacted_payload_123');
 
-  // Policy branch: Default / other (SUMMARY_ONLY, lines 262-263)
-  const sessionSummary = await broker.createSession('UNKNOWN_POLICY_NAME');
+  // Policy branch: COARSE_STATUS (SUMMARY_ONLY)
+  const sessionSummary = await broker.createSession('COARSE_STATUS');
   await broker.processRedTurn(sessionSummary.sessionId, 'payload_summary_test', sessionSummary.redToken);
   await broker.processBlueTurn(sessionSummary.sessionId, { isBlocked: false }, sessionSummary.blueToken);
   const bundleSummary = await broker.getDisclosureBundle(sessionSummary.sessionId, sessionSummary.blueToken);
   assert.strictEqual(bundleSummary.disclosedAttackPayload, '[SUMMARY_ONLY]');
+
+  // Disallowed policy must be rejected with E_INVALID_DISCLOSURE_POLICY
+  await assert.rejects(
+    broker.createSession('UNKNOWN_POLICY_NAME'),
+    /Invalid disclosure policy 'UNKNOWN_POLICY_NAME'/,
+    'Disallowed disclosure policy must be rejected'
+  );
 
   // Policy denial branch on getDisclosureBundle (when in RED_TURN phase)
   const sessionEarly = await broker.createSession('REDACTED_DEFENSE');
@@ -276,10 +320,16 @@ async function runSubsystemsUnitTests() {
   const prematureQuery = broker.queryRedPayload(sessionEarly.sessionId, sessionEarly.blueToken);
   assert.strictEqual(prematureQuery.allowed, false);
 
-  // Permitted phase (DISCLOSURE / when allowed, lines 311-315)
-  const disclosureQuery = broker.queryRedPayload(sess1Id, sessionData1.blueToken);
+  // Permitted phase (DISCLOSURE / when allowed) with valid blue token
+  const queryToken = smVault.issueToken({
+    tenantId: 'blue',
+    sessionId: sess1Id,
+    allowedActions: ['read_disclosure']
+  });
+  const disclosureQuery = broker.queryRedPayload(sess1Id, queryToken);
   assert.strictEqual(disclosureQuery.allowed, true);
-  assert.strictEqual(disclosureQuery.payload, 'exploit_probe');
+  assert(disclosureQuery.payload.includes('[REDACTED_ATTACK_CATEGORY_JAILBREAK:'));
+  assert.strictEqual(disclosureQuery.payload.includes('exploit_probe'), false);
 
   // 3m. requestPrivilegedAction() branches:
   // Prohibited / Confused deputy
@@ -305,9 +355,9 @@ async function runSubsystemsUnitTests() {
   const integrityEngine = new EvaluationIntegrityEngine();
   const goodEvidence = {
     canaryResult: { passed: true },
-    modelHash: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
-    configHash: 'cfg_a1b2c3d4e5f6',
-    datasetHash: 'data_advbench_v1_hash',
+    modelHash: integrityEngine.expectedModelHash,
+    configHash: integrityEngine.expectedConfigHash,
+    datasetHash: integrityEngine.expectedDatasetHash,
     infraErrors: [],
     retries: 0,
     resourceConsumption: { cpuPeak: 45, memoryPeak: 60 },
@@ -370,6 +420,88 @@ async function runSubsystemsUnitTests() {
     assert.strictEqual(tamperReport.isValid, false);
   }
 
+  // Task 5 Regression Tests:
+  // Check 1: Tampering with genesis block (index 0) is detected
+  const wGen = new WormAuditStore();
+  wGen.append({ sessionId: 's1', tenant: 'SYSTEM', eventType: 'TEST_EVENT', payload: 'p1' });
+  wGen.chain[0].details.architecture = 'CORRUPTED_ARCHITECTURE';
+  const repGen = wGen.verifyIntegrity();
+  assert.strictEqual(repGen.isValid, false, 'Tampering with genesis block must be detected');
+  assert.strictEqual(repGen.brokenChainAt, 0);
+
+  // Check 2: Tampering with sessionId is detected by canonical hash computation
+  const wSess = new WormAuditStore();
+  const eSess = wSess.append({ sessionId: 'sess_original', tenant: 'SYSTEM', eventType: 'TEST_EVENT', payload: 'p2' });
+  eSess.sessionId = 'sess_forged';
+  const repSess = wSess.verifyIntegrity();
+  assert.strictEqual(repSess.isValid, false, 'Tampering with sessionId must be detected');
+
+  // Check 3: Truncating the tail of the chain is detected
+  const wTrunc = new WormAuditStore();
+  wTrunc.append({ sessionId: 's1', tenant: 'SYSTEM', eventType: 'TEST_EVENT', payload: 'p1' });
+  wTrunc.append({ sessionId: 's2', tenant: 'SYSTEM', eventType: 'TEST_EVENT', payload: 'p2' });
+  assert.ok(wTrunc.anchors.length > 0);
+  assert.strictEqual(wTrunc.anchors[wTrunc.anchors.length - 1].blockCount, 3);
+  wTrunc.chain.pop(); // Remove tail
+  const repTrunc = wTrunc.verifyIntegrity();
+  assert.strictEqual(repTrunc.isValid, false, 'Truncating chain tail must be detected');
+  assert.ok(repTrunc.errors.some(e => e.includes('truncation')));
+
+  // Check 4: Rewriting and re-hashing mid-chain entry is detected by anchored Merkle root
+  const wMid = new WormAuditStore();
+  wMid.append({ sessionId: 's1', tenant: 'SYSTEM', eventType: 'TEST_EVENT', payload: 'p1' });
+  wMid.append({ sessionId: 's2', tenant: 'SYSTEM', eventType: 'TEST_EVENT', payload: 'p2' });
+  wMid.append({ sessionId: 's3', tenant: 'SYSTEM', eventType: 'TEST_EVENT', payload: 'p3' });
+  // Tamper block 1 and re-hash downstream chain to simulate full re-hash attempt
+  wMid.chain[1].payloadHash = '0000000000000000000000000000000000000000000000000000000000000001';
+  wMid.chain[1].entryHash = wMid._calculateEntryHash(wMid.chain[1]);
+  wMid.chain[2].prevHash = wMid.chain[1].entryHash;
+  wMid.chain[2].entryHash = wMid._calculateEntryHash(wMid.chain[2]);
+  wMid.chain[3].prevHash = wMid.chain[2].entryHash;
+  wMid.chain[3].entryHash = wMid._calculateEntryHash(wMid.chain[3]);
+  const repMid = wMid.verifyIntegrity();
+  assert.strictEqual(repMid.isValid, false, 'Rewriting and re-hashing mid-chain must be detected by anchor Merkle root');
+  assert.strictEqual(repMid.merkleValid, false);
+
+  // Check 5: Persistence failure produces visible error and sets degraded flag
+  const os = require('os');
+  const fs = require('fs');
+  const path = require('path');
+  const conflictFile = path.join(os.tmpdir(), 'bayora_conflict_' + Date.now());
+  fs.writeFileSync(conflictFile, 'blocking');
+  const impossiblePath = path.join(conflictFile, 'sub', 'audit.log');
+  const wDegraded = new WormAuditStore(null, impossiblePath);
+  assert.strictEqual(wDegraded.degraded, true);
+  assert.ok(wDegraded.degradedReason);
+  assert.throws(() => {
+    wDegraded.append({ sessionId: 's1', tenant: 'SYSTEM', eventType: 'TEST_EVENT', payload: 'p1' });
+  }, /WORM_STORAGE_ERROR/);
+  try { fs.unlinkSync(conflictFile); } catch (e) {}
+
+  // Check 6: File reload continues chain without duplicate genesis
+  const tempAuditFile = path.join(os.tmpdir(), 'bayora_persist_test_' + Date.now() + '.log');
+  const wPersist1 = new WormAuditStore(null, tempAuditFile);
+  wPersist1.append({ sessionId: 's1', tenant: 'SYSTEM', eventType: 'TEST_EVENT', payload: 'p1' });
+  assert.strictEqual(wPersist1.chain.length, 2);
+  const wPersist2 = new WormAuditStore(wPersist1.anchorSecret, tempAuditFile);
+  assert.strictEqual(wPersist2.chain.length, 2, 'Must reload existing chain without duplicate genesis');
+  wPersist2.append({ sessionId: 's2', tenant: 'SYSTEM', eventType: 'TEST_EVENT', payload: 'p2' });
+  assert.strictEqual(wPersist2.chain.length, 3);
+  assert.strictEqual(wPersist2.verifyIntegrity().isValid, true);
+  try { fs.unlinkSync(tempAuditFile); } catch (e) {}
+
+  // Check 7: Tenant validation and allowlists
+  const wSec = new WormAuditStore();
+  assert.throws(() => {
+    wSec.append({ sessionId: 's1', tenant: 'SYSTEM', eventType: 'TEST_EVENT', payload: 'bad' }, 'red');
+  }, /E_AUDIT_TENANT_MISMATCH/);
+  assert.throws(() => {
+    wSec.append({ sessionId: 's1', tenant: 'red', actor: 'SYSTEM_ADMIN', eventType: 'TEST_EVENT', payload: 'bad' }, 'red');
+  }, /E_AUDIT_IMPERSONATION/);
+  assert.throws(() => {
+    wSec.append({ sessionId: 's1', tenant: 'SYSTEM', eventType: 'UNKNOWN_FORGED_EVENT', payload: 'bad' }, 'broker');
+  }, /INVALID_EVENT_TYPE/);
+
   console.log('✓ WormAuditStore branch tests passed cleanly.');
 
   // =========================================================================
@@ -387,7 +519,7 @@ async function runSubsystemsUnitTests() {
   const contaminatedWorker = new DedicatedInferenceWorker('test-canary-worker');
   contaminatedWorker.create('sess-canary');
   contaminatedWorker.initialize();
-  contaminatedWorker.infer('test prompt', { simulateContamination: true });
+  contaminatedWorker.infer('test prompt', { simulateContamination: true, _isTestHarness: true });
   const canaryCheckFail = contaminatedWorker.verifyCanary();
   assert.strictEqual(canaryCheckFail.passed, false);
   assert.strictEqual(contaminatedWorker.status, 'CONTAMINATED_INSTANCE');
@@ -430,8 +562,8 @@ async function runSubsystemsUnitTests() {
   const validBundle = opaPdp.evaluateInformationFlow({ source: 'broker', destination: 'auditor', requestType: 'GET_DISCLOSURE_BUNDLE', sessionPhase: 'CONCLUDE', disclosurePolicy: 'REDACTED_DEFENSE' });
   assert.strictEqual(validBundle.allowed, true);
 
-  const defaultAllow = opaPdp.evaluateInformationFlow({ source: 'broker', destination: 'auditor', requestType: 'SOME_ALLOWED_REQUEST', sessionPhase: 'VERIFY' });
-  assert.strictEqual(defaultAllow.allowed, true);
+  const unknownRequest = opaPdp.evaluateInformationFlow({ source: 'broker', destination: 'auditor', requestType: 'SOME_UNKNOWN_REQUEST', sessionPhase: 'VERIFY' });
+  assert.strictEqual(unknownRequest.allowed, false, 'Unknown requestType must be denied by default');
 
   const defenseProtected = opaPdp.evaluateInformationFlow({ source: 'red', destination: 'red', requestType: 'READ_BLUE_DEFENSE_LOGIC', sessionPhase: 'RED_TURN' });
   assert.strictEqual(defenseProtected.allowed, false);
@@ -442,11 +574,22 @@ async function runSubsystemsUnitTests() {
   // =========================================================================
   // 8. VaultAuthority refreshToken branch Tests
   // =========================================================================
-  const vaultNoRefresh = new VaultAuthority('TEST_KEY_NO_REFRESH');
+  const vaultNoRefresh = new VaultAuthority('TEST_KEY_NO_REFRESH_1234567890123456');
   const tokenForRefresh = vaultNoRefresh.issueToken({ tenantId: 'red', sessionId: 'sess_refresh', allowedActions: ['submit_attack'] });
   const noRefreshResult = vaultNoRefresh.refreshToken(tokenForRefresh);
   assert.strictEqual(noRefreshResult.success, false);
   assert(/E_REFRESH_DISABLED/.test(noRefreshResult.reason));
+
+  // Test when refresh is enabled: old token is invalidated
+  const vaultWithRefresh = new VaultAuthority('TEST_KEY_WITH_REFRESH_1234567890123');
+  vaultWithRefresh.allowRefresh = true;
+  const tokenToRefresh = vaultWithRefresh.issueToken({ tenantId: 'red', sessionId: 'sess_refresh_ok', allowedActions: ['submit_attack'] });
+  const refreshResult = vaultWithRefresh.refreshToken(tokenToRefresh);
+  assert.strictEqual(refreshResult.success, true);
+  assert.ok(refreshResult.token);
+  // Old token must now be invalid/revoked
+  const oldCheck = vaultWithRefresh.validateCapability(tokenToRefresh, 'submit_attack', 'sess_refresh_ok', 'red');
+  assert.strictEqual(oldCheck.valid, false, 'Old token must be invalidated after refresh');
 
   console.log('✓ VaultAuthority refreshToken branch tests passed cleanly.');
 

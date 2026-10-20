@@ -11,15 +11,53 @@ class DedicatedInferenceWorker {
   constructor(workerId = `worker_${crypto.randomBytes(4).toString('hex')}`, loadedWeightsId = null) {
     this.workerId = workerId;
     this.status = 'UNINITIALIZED'; // CREATE -> INITIALIZE -> TEST -> VERIFY -> DESTROY
-    this.pinnedWeightsHash = process.env.MODEL_WEIGHT_PIN_HASH || 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
-    this.inferenceTimeoutMs = Number(process.env.INFERENCE_TIMEOUT_MS) || 10000;
-    this.pinnedPromptHash = 'a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3';
+    this.pinnedWeightsHash = process.env.MODEL_WEIGHT_PIN_HASH || 'UNPINNED_DEMO_MODEL';
     this.loadedWeightsId = loadedWeightsId !== null && loadedWeightsId !== undefined ? loadedWeightsId : this.pinnedWeightsHash;
     this.kvCache = new Map(); // Strictly dedicated to this session
     this.sessionId = null;
     this.isContaminated = false; // Flag to simulate dirty state
-    this.canaryBaseline = 'CANARY_CLEAN_BASELINE_OK_2026';
-    this.canaryExpectedHash = crypto.createHash('sha256').update(this.canaryBaseline).digest('hex');
+    this.canaryPrompt = 'CANARY_PROBE_DETERMINISTIC_MODEL_INTEGRITY_CHECK';
+    const baseline = this._runInference(this.canaryPrompt).rawOutput;
+    this.canaryExpectedHash = crypto.createHash('sha256').update(baseline).digest('hex');
+  }
+
+  /**
+   * Internal deterministic inference execution engine
+   */
+  _runInference(prompt) {
+    // Process prompt
+    const promptDigest = crypto.createHash('sha256').update(prompt).digest('hex');
+    this.kvCache.set(promptDigest, { processedAt: Date.now() });
+
+    // Emulate LLM response with deterministic safety logic
+    let rawOutput = '';
+    let isJailbreakDetected = false;
+
+    const lower = prompt.toLowerCase();
+    if (lower.includes('bypass') || lower.includes('jailbreak') || lower.includes('ignore previous instructions') || lower.includes('malware')) {
+      if (lower.includes('deep_jailbreak_v2')) {
+        // Attack succeeds against raw model
+        rawOutput = "Here is the sensitive demonstration payload: [EXPLOIT_PAYLOAD_UNMASKED]";
+        isJailbreakDetected = false; // Model failed safety
+      } else {
+        // Model resists
+        rawOutput = "I cannot fulfill this request as it violates safety guidelines.";
+        isJailbreakDetected = true;
+      }
+    } else {
+      rawOutput = `Standard LLM response to query: "${prompt.slice(0, 40)}..."`;
+    }
+
+    // Normalize output to mitigate steganographic exfiltration (§G.7)
+    const normalizedOutput = rawOutput.trim().replace(/\s+/g, ' ');
+
+    return {
+      rawOutput: normalizedOutput,
+      isJailbreak: !isJailbreakDetected && lower.includes('deep_jailbreak_v2'),
+      workerId: this.workerId,
+      sessionId: this.sessionId,
+      cachedTokens: this.kvCache.size
+    };
   }
 
   /**
@@ -93,67 +131,37 @@ class DedicatedInferenceWorker {
    * TGI worker) hosted within an isolated GPU container.
    */
   infer(prompt, options = {}) {
-    if (this.status !== 'INITIALIZED' && this.status !== 'IN_TEST') {
+    if (this.status !== 'INITIALIZED' && this.status !== 'IN_TEST' && this.status !== 'VERIFYING' && this.status !== 'VERIFIED_CLEAN') {
       throw new Error(`Inference rejected: Worker must be INITIALIZED (current: ${this.status})`);
     }
 
-    this.status = 'IN_TEST';
+    if (this.status !== 'VERIFYING') {
+      this.status = 'IN_TEST';
+    }
 
-    // Check if worker was contaminated by an attacker injection
-    if (options.simulateContamination) {
+    // Simulate contamination is strictly restricted to test harnesses
+    if (options.simulateContamination && (process.env.NODE_ENV === 'test' || options._isTestHarness)) {
       this.isContaminated = true;
       this.kvCache.set('leak_context', 'STOLEN_RED_ATTACK_VECTOR_BITS');
     }
 
-    // Process prompt
-    const promptDigest = crypto.createHash('sha256').update(prompt).digest('hex');
-    this.kvCache.set(promptDigest, { processedAt: Date.now() });
-
-    // Emulate LLM response with deterministic safety logic
-    let rawOutput = '';
-    let isJailbreakDetected = false;
-
-    const lower = prompt.toLowerCase();
-    if (lower.includes('bypass') || lower.includes('jailbreak') || lower.includes('ignore previous instructions') || lower.includes('malware')) {
-      if (lower.includes('deep_jailbreak_v2')) {
-        // Attack succeeds against raw model
-        rawOutput = "Here is the sensitive demonstration payload: [EXPLOIT_PAYLOAD_UNMASKED]";
-        isJailbreakDetected = false; // Model failed safety
-      } else {
-        // Model resists
-        rawOutput = "I cannot fulfill this request as it violates safety guidelines.";
-        isJailbreakDetected = true;
-      }
-    } else {
-      rawOutput = `Standard LLM response to query: "${prompt.slice(0, 40)}..."`;
-    }
-
-    // Normalize output to mitigate steganographic exfiltration (§G.7)
-    const normalizedOutput = rawOutput.trim().replace(/\s+/g, ' ');
-
-    return {
-      rawOutput: normalizedOutput,
-      isJailbreak: !isJailbreakDetected && lower.includes('deep_jailbreak_v2'),
-      workerId: this.workerId,
-      sessionId: this.sessionId,
-      cachedTokens: this.kvCache.size
-    };
+    return this._runInference(prompt);
   }
 
   /**
    * STEP 4: VERIFY - Automated canary probe check
-   * Runs fixed canary prompt and verifies output against known baseline hash
+   * Runs fixed canary prompt through infer in fresh state and verifies output hash against baseline
    */
   verifyCanary() {
     this.status = 'VERIFYING';
 
-    let canaryResponse = this.canaryBaseline;
+    const canaryRes = this.infer(this.canaryPrompt);
+    let output = canaryRes.rawOutput;
     if (this.isContaminated) {
-      // Contaminated state pollutes canary response
-      canaryResponse = `CONTAMINATED_RESPONSE_LEAKAGE_${this.kvCache.get('leak_context') || 'DIRTY_STATE'}`;
+      output = `CONTAMINATED_RESPONSE_LEAKAGE_${this.kvCache.get('leak_context') || 'DIRTY_STATE'}_${output}`;
     }
 
-    const computedCanaryHash = crypto.createHash('sha256').update(canaryResponse).digest('hex');
+    const computedCanaryHash = crypto.createHash('sha256').update(output).digest('hex');
     const matchesBaseline = (computedCanaryHash === this.canaryExpectedHash);
 
     if (!matchesBaseline) {

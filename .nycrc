@@ -13,6 +13,6 @@
   "functions": 85,
   "statements": 85,
   "check-coverage": true,
-  "all": false,
+  "all": true,
   "cache": false
 }

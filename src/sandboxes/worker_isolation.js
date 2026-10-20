@@ -23,6 +23,10 @@
  *
  * This layer represents partial runtime memory isolation at the JavaScript engine tier,
  * and must NOT be equated with hypervisor or hardware container isolation (Kata).
+ * CRITICAL ARCHITECTURAL DISTINCTION:
+ * These worker threads execute ONLY server-authored code (e.g. predefined keyword scanning, canned probes)
+ * with structured message parameters. They do NOT evaluate arbitrary, untrusted tenant-authored
+ * JavaScript code, and are NOT a tenant-code sandbox.
  */
 
 const { Worker } = require('worker_threads');
@@ -37,8 +41,32 @@ const DEFAULT_RESOURCE_LIMITS = {
 
 const WORKER_SCRIPT_PATH = path.join(__dirname, 'workers', 'tenant_worker.js');
 
+const MAX_CONCURRENT_WORKERS = Number(process.env.MAX_CONCURRENT_WORKERS) || 8;
+let runningWorkers = 0;
+const workerQueue = [];
+
+function acquireWorkerSlot() {
+  if (runningWorkers < MAX_CONCURRENT_WORKERS) {
+    runningWorkers++;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    workerQueue.push(resolve);
+  });
+}
+
+function releaseWorkerSlot() {
+  runningWorkers--;
+  if (workerQueue.length > 0) {
+    const next = workerQueue.shift();
+    runningWorkers++;
+    next();
+  }
+}
+
 /**
- * Spawns a dedicated, single-use V8 worker_thread to execute a sandboxed tenant task.
+ * Spawns a dedicated, single-use V8 worker_thread to execute a sandboxed tenant task,
+ * bounded by a concurrency semaphore.
  *
  * @param {string} tenantId - 'red' | 'blue' | 'model'
  * @param {object} task - Task payload ({ type: string, ... })
@@ -46,7 +74,16 @@ const WORKER_SCRIPT_PATH = path.join(__dirname, 'workers', 'tenant_worker.js');
  * @param {number} [timeoutMs] - Execution timeout in ms (default: 5000)
  * @returns {Promise<any>} Resolves with the worker task result
  */
-function runInIsolatedWorker(tenantId, task, resourceLimits = DEFAULT_RESOURCE_LIMITS, timeoutMs = 5000) {
+async function runInIsolatedWorker(tenantId, task, resourceLimits = DEFAULT_RESOURCE_LIMITS, timeoutMs = 5000) {
+  await acquireWorkerSlot();
+  try {
+    return await _executeIsolatedWorker(tenantId, task, resourceLimits, timeoutMs);
+  } finally {
+    releaseWorkerSlot();
+  }
+}
+
+function _executeIsolatedWorker(tenantId, task, resourceLimits = DEFAULT_RESOURCE_LIMITS, timeoutMs = 5000) {
   return new Promise((resolve, reject) => {
     const mergedLimits = {
       ...DEFAULT_RESOURCE_LIMITS,

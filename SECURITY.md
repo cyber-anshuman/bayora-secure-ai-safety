@@ -43,3 +43,13 @@ If you discover a security vulnerability in the Bayora platform, please report i
 - **Hypervisor 0-day**: Host breakout against the underlying Linux/KVM kernel outside of Kata microVM protections (target architecture; not yet running in this single-process PoC).
 - **Hardware-level side channels**: Cache timing attacks (Spectre/Meltdown) when co-located without confidential computing (AMD SEV-SNP or Intel TDX).
 - **Colluding insiders**: A cloud root administrator with physical/console access who can reconfigure IAM and WORM storage buckets out-of-band.
+
+---
+
+## ⚠️ Known Limitations
+
+1. **No Hypervisor Enforcement**: Isolation between tenant sandboxes is implemented via Node.js `worker_threads` with V8 isolate memory limits (`resourceLimits`). Physical Kata Containers microVM isolation is modeled in configuration metadata rather than enforced by a hypervisor.
+2. **No Kernel eBPF Enforcement**: Network security is evaluated via in-process OPA PDP logic (`OpaPolicyEngine`) rather than live Linux kernel eBPF bytecode hooks.
+3. **Scripted Inference Stub**: The inference engine (`DedicatedInferenceWorker`) is a scripted deterministic model stand-in designed for reproducible test evaluation, not an external production GPU LLM server.
+4. **Audit Anchor Trust Limits**: External Merkle root audit anchors are HMAC-signed; their immutability is as trustworthy as the storage medium and private keys used to publish them.
+
