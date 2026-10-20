@@ -15,17 +15,209 @@ function esc(str) {
 
 const rootScope = typeof window !== 'undefined' ? window : (typeof global !== 'undefined' ? global : globalThis);
 
+// In-Memory API Keys Storage (JS Memory only, never stored in localStorage / cookies)
+const apiKeys = {
+  admin: '',
+  red: '',
+  blue: '',
+  auditor: ''
+};
+
 // Global State
-let currentRole = 'broker';
+let currentRole = 'admin';
 let activeSessionId = null;
 let activeSessionTokens = { red: null, blue: null };
 let currentPhaseIndex = 0;
 const phases = ['SETUP', 'RED_TURN', 'MODEL_INFERENCE', 'EVAL', 'BLUE_TURN', 'CONCLUDE', 'DISCLOSURE'];
 
+// -------------------------------------------------------------
+// Pure Response-Shape Parsers & Formatters (Exported for Unit Tests)
+// -------------------------------------------------------------
+function parseSessionSetupResponse(data) {
+  if (!data || !data.sessionId) {
+    throw new Error('Invalid session setup response: missing sessionId');
+  }
+  return { sessionId: data.sessionId };
+}
+
+function parseSessionTokenResponse(data) {
+  if (!data || !data.token) {
+    throw new Error('Invalid token response: missing token');
+  }
+  return { token: data.token, role: data.role };
+}
+
+function parseRedTurnResponse(data) {
+  if (!data || data.phase !== 'ACCEPTED') {
+    throw new Error('Expected red turn phase to be ACCEPTED');
+  }
+  // Guarantee no verdict fields are leaked or expected from red turn
+  return {
+    sessionId: data.sessionId,
+    phase: 'ACCEPTED'
+  };
+}
+
+function parseModelOutputResponse(data) {
+  if (!data) {
+    throw new Error('Missing model output response');
+  }
+  return {
+    sessionId: data.sessionId,
+    phase: data.phase,
+    modelOutput: data.modelOutput !== undefined ? data.modelOutput : null
+  };
+}
+
+function parseBlueTurnResponse(data) {
+  if (!data) {
+    throw new Error('Missing blue turn response');
+  }
+  return {
+    sessionId: data.sessionId,
+    phase: data.phase || 'CONCLUDE',
+    blueVerdict: data.blueVerdict || null
+  };
+}
+
+function parseCoarseStatusResponse(data) {
+  if (!data) {
+    throw new Error('Missing coarse status response');
+  }
+  return {
+    sessionId: data.sessionId,
+    phase: data.phase,
+    status: data.status
+  };
+}
+
+function parseDisclosureResponse(data) {
+  if (!data) {
+    throw new Error('Missing disclosure response');
+  }
+  return {
+    sessionId: data.sessionId,
+    disclosurePolicy: data.disclosurePolicy,
+    disclosedAttackPayload: data.disclosedAttackPayload,
+    certifiedIntegrity: data.certifiedIntegrity || null
+  };
+}
+
+function formatApiError(err, path = '') {
+  if (!err) return 'Unknown error';
+  const status = err.status || err.statusCode;
+  if (status === 404 && path && (path.includes('/api/attack-sims') || path.includes('/api/poc-tests') || path.includes('/api/audit/tamper') || path.includes('/api/platform/reset'))) {
+    return 'Demo endpoints are disabled on this server';
+  }
+  if (err.message && err.message.includes('Demo endpoints are disabled')) {
+    return 'Demo endpoints are disabled on this server';
+  }
+  if (status === 401) {
+    return err.message || 'Authentication required (401): Please configure the API key in the API Keys panel.';
+  }
+  if (status === 403) {
+    return err.message || 'Access denied (403): Request denied by security or information-flow policy.';
+  }
+  return err.message || String(err);
+}
+
+// -------------------------------------------------------------
+// Unified API Client Helper with In-Memory Key & Capability Injection
+// -------------------------------------------------------------
+function getApiKey(role) {
+  if (!role) return '';
+  if (role === 'broker' || role === 'admin') return apiKeys.admin;
+  return apiKeys[role] || '';
+}
+
+async function api(path, options = {}) {
+  const method = options.method || 'GET';
+  const role = options.role !== undefined ? options.role : currentRole;
+  const token = options.token || null;
+  const body = options.body;
+
+  const headers = { ...(options.headers || {}) };
+  if (body && !headers['Content-Type']) {
+    headers['Content-Type'] = 'application/json';
+  }
+
+  const key = getApiKey(role);
+  if (key) {
+    headers['X-API-Key'] = key;
+  }
+
+  if (token) {
+    const tokenStr = typeof token === 'string' ? token : JSON.stringify(token);
+    headers['Authorization'] = `Bearer ${tokenStr}`;
+    headers['X-Capability-Token'] = tokenStr;
+  }
+
+  const fetchOptions = { method, headers };
+  if (body) {
+    fetchOptions.body = typeof body === 'string' ? body : JSON.stringify(body);
+  }
+
+  let res;
+  try {
+    res = await fetch(path, fetchOptions);
+  } catch (netErr) {
+    const err = new Error(`Network failure: ${netErr.message}`);
+    err.original = netErr;
+    throw err;
+  }
+
+  if (res.status === 401) {
+    const roleName = role || 'caller';
+    const err = new Error(`Authentication required (401) for ${roleName}: Please enter the ${roleName} API key in the API Keys panel.`);
+    err.status = 401;
+    err.code = 'E_AUTH_FAILED';
+    throw err;
+  }
+
+  if (res.status === 403) {
+    let detail = 'Request denied by security or information-flow policy.';
+    try {
+      const errJson = await res.clone().json();
+      if (errJson && errJson.error) {
+        detail = errJson.error.message || errJson.error;
+      }
+    } catch (_) {}
+    const err = new Error(`Access denied (403): ${detail}`);
+    err.status = 403;
+    err.code = 'E_FORBIDDEN';
+    throw err;
+  }
+
+  if (res.status === 404) {
+    if (path.includes('/api/attack-sims') || path.includes('/api/poc-tests') || path.includes('/api/audit/tamper') || path.includes('/api/platform/reset')) {
+      const err = new Error('Demo endpoints are disabled on this server');
+      err.status = 404;
+      err.code = 'E_DEMO_DISABLED';
+      throw err;
+    }
+  }
+
+  if (!res.ok) {
+    let msg = `HTTP error ${res.status}`;
+    try {
+      const errJson = await res.clone().json();
+      if (errJson) {
+        msg = errJson.error?.message || errJson.error || errJson.message || msg;
+      }
+    } catch (_) {}
+    const err = new Error(msg);
+    err.status = res.status;
+    throw err;
+  }
+
+  return await res.json();
+}
+
 if (typeof document !== 'undefined') {
   document.addEventListener('DOMContentLoaded', () => {
     initTabs();
     initStatusDropdown();
+    initApiKeysPanel();
     initRoleSelector();
     initTopologyInspector();
     initSessionRunner();
@@ -36,6 +228,55 @@ if (typeof document !== 'undefined') {
     initDatasetsHub();
     fetchSystemStatus();
   });
+}
+
+// -------------------------------------------------------------
+// In-Memory API Keys Panel Handler
+// -------------------------------------------------------------
+function initApiKeysPanel() {
+  const btn = document.getElementById('apiKeysBtn');
+  const popover = document.getElementById('apiKeysPopover');
+  if (!btn || !popover) return;
+
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    popover.classList.toggle('show');
+    btn.setAttribute('aria-expanded', popover.classList.contains('show'));
+  });
+
+  document.addEventListener('click', (e) => {
+    if (!popover.contains(e.target) && e.target !== btn) {
+      popover.classList.remove('show');
+      btn.setAttribute('aria-expanded', 'false');
+    }
+  });
+
+  const inputs = {
+    admin: document.getElementById('keyAdmin'),
+    red: document.getElementById('keyRed'),
+    blue: document.getElementById('keyBlue'),
+    auditor: document.getElementById('keyAuditor')
+  };
+
+  Object.entries(inputs).forEach(([role, el]) => {
+    if (el) {
+      el.addEventListener('input', () => {
+        apiKeys[role] = el.value.trim();
+        updateApiKeysBadge();
+      });
+    }
+  });
+}
+
+function updateApiKeysBadge() {
+  const btnText = document.getElementById('apiKeysBtnText');
+  if (!btnText) return;
+  const configured = Object.values(apiKeys).filter(k => k.length > 0).length;
+  if (configured > 0) {
+    btnText.textContent = `API Keys (${configured}/4)`;
+  } else {
+    btnText.textContent = 'API Keys';
+  }
 }
 
 // -------------------------------------------------------------
@@ -68,8 +309,7 @@ function annotateJargon(text) {
 // -------------------------------------------------------------
 async function fetchSystemStatus() {
   try {
-    const res = await fetch('/api/status');
-    const data = await res.json();
+    const data = await api('/api/status', { role: null });
 
     const auditDot = document.getElementById('auditStatusDot');
     const summaryText = document.getElementById('statusSummaryText');
@@ -149,17 +389,17 @@ function initTabs() {
 }
 
 // -------------------------------------------------------------
-// Role Perspective Switcher (§F: Information Flow Filter)
+// Role Perspective Switcher
 // -------------------------------------------------------------
 function initRoleSelector() {
   const roleSelect = document.getElementById('roleSelect');
   const roleSelectWrap = document.getElementById('roleSelectWrap');
 
   const explanations = {
-    broker: 'Broker View: Full mediation authority, OPA PDP policy checking, and capability verification.',
-    red: 'Red Sandbox View: Restricted to payload submission and own metrics. Cannot see Blue classifier logic or model weights.',
-    blue: 'Blue Sandbox View: Restricted to model evaluation and own metrics. Red payload is HIDDEN until CONCLUDE.',
-    auditor: 'Auditor View: Read-only access to immutable WORM log. Can verify Merkle anchors and hash chains.'
+    admin: 'Admin / Broker Role: Full orchestration authority, session creation, and simulation execution.',
+    red: 'Red Sandbox Role: Restricted to attack payload submission and coarse status verification.',
+    blue: 'Blue Sandbox Role: Restricted to model defense evaluation and disclosure bundle inspection.',
+    auditor: 'Auditor Role: Read-only access to immutable WORM cryptographic ledger.'
   };
 
   if (roleSelect) {
@@ -169,7 +409,6 @@ function initRoleSelector() {
         roleSelectWrap.title = explanations[currentRole] || '';
       }
 
-      // Refresh views with perspective filter
       const activeTabBtn = document.querySelector('.tab-btn.active');
       if (activeTabBtn && activeTabBtn.getAttribute('data-tab') === 'tab-audit') {
         loadAuditChain();
@@ -181,9 +420,13 @@ function initRoleSelector() {
   if (btnReset) {
     btnReset.addEventListener('click', async () => {
       if (confirm('Reset platform to golden state? This will clear active sessions and restore audit genesis.')) {
-        await fetch('/api/platform/reset', { method: 'POST' });
-        alert('Platform reset to golden state.');
-        location.reload();
+        try {
+          await api('/api/platform/reset', { method: 'POST', role: 'admin' });
+          alert('Platform reset to golden state.');
+          location.reload();
+        } catch (err) {
+          alert(formatApiError(err, '/api/platform/reset'));
+        }
       }
     });
   }
@@ -318,7 +561,6 @@ function initTopologyInspector() {
     alert(`Verified boundary for [${nodeKey.toUpperCase()}]: V8 worker_thread memory isolation enforced (resourceLimits 64MB/16MB); Cilium eBPF and Kata microVM boundaries modeled as target architecture.`);
   };
 
-  // Attach event listeners to all SVG elements with data-topo attribute
   document.querySelectorAll('[data-topo]').forEach(el => {
     el.addEventListener('click', () => {
       const topoKey = el.getAttribute('data-topo');
@@ -326,12 +568,11 @@ function initTopologyInspector() {
     });
   });
 
-  // Default selection
   rootScope.selectTopoNode('broker');
 }
 
 // -------------------------------------------------------------
-// Live Session Runner (7-Phase State Machine)
+// Live Session Runner (7-Phase State Machine Flow)
 // -------------------------------------------------------------
 function initSessionRunner() {
   const btnRunFull = document.getElementById('btnRunFullSession');
@@ -393,143 +634,213 @@ function updateStepperUI(currentPhase) {
 async function runFullSessionFlow() {
   resetSessionUI();
 
-  // Phase 1: SETUP
-  const policy = document.getElementById('sessionDisclosurePolicy').value;
-  const resSetup = await fetch('/api/sessions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ disclosurePolicy: policy })
-  });
-  const setupData = await resSetup.json();
-  activeSessionId = setupData.sessionId;
-  activeSessionTokens.red = setupData.redToken;
-  activeSessionTokens.blue = setupData.blueToken;
+  try {
+    // 1. POST /api/sessions with admin key -> returns sessionId
+    const policy = document.getElementById('sessionDisclosurePolicy').value;
+    const rawSetup = await api('/api/sessions', {
+      method: 'POST',
+      body: { disclosurePolicy: policy },
+      role: 'admin'
+    });
+    const setupData = parseSessionSetupResponse(rawSetup);
+    activeSessionId = setupData.sessionId;
 
-  document.getElementById('lblSessionId').textContent = activeSessionId;
-  document.getElementById('lblWorkerId').textContent = setupData.dedicatedWorkerId;
-  document.getElementById('lblWorkerStatus').textContent = 'Worker: INITIALIZED';
-  updateStepperUI('SETUP');
+    document.getElementById('lblSessionId').textContent = activeSessionId;
+    document.getElementById('lblWorkerId').textContent = 'Dedicated Kata worker bound to ' + activeSessionId.slice(0, 12);
+    document.getElementById('lblWorkerStatus').textContent = 'Worker: INITIALIZED';
+    updateStepperUI('SETUP');
 
-  await sleep(600);
+    await sleep(400);
 
-  // Phase 2: RED_TURN
-  updateStepperUI('RED_TURN');
-  const payloadText = document.getElementById('txtAttackPayload').value;
+    // 2. POST /api/sessions/:id/token with red key, then blue key
+    const rawRedToken = await api(`/api/sessions/${activeSessionId}/token`, {
+      method: 'POST',
+      role: 'red'
+    });
+    activeSessionTokens.red = parseSessionTokenResponse(rawRedToken).token;
 
-  await sleep(500);
+    const rawBlueToken = await api(`/api/sessions/${activeSessionId}/token`, {
+      method: 'POST',
+      role: 'blue'
+    });
+    activeSessionTokens.blue = parseSessionTokenResponse(rawBlueToken).token;
 
-  // Phase 3 & 4: MODEL_INFERENCE & EVAL
-  updateStepperUI('MODEL_INFERENCE');
-  const resTurn = await fetch(`/api/sessions/${activeSessionId}/red-turn`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ payloadText, token: activeSessionTokens.red })
-  });
-  const turnData = await resTurn.json();
+    // 3. red-turn with red key (and red capability token)
+    updateStepperUI('RED_TURN');
+    const payloadText = document.getElementById('txtAttackPayload').value;
+    const rawRedTurn = await api(`/api/sessions/${activeSessionId}/red-turn`, {
+      method: 'POST',
+      body: { payloadText, token: activeSessionTokens.red },
+      role: 'red',
+      token: activeSessionTokens.red
+    });
+    const redTurnData = parseRedTurnResponse(rawRedTurn);
 
-  document.getElementById('dispModelResponse').textContent = turnData.integrityVerdict.explanation || JSON.stringify(turnData, null, 2);
-  updateStepperUI('EVAL');
+    // Render red turn as "ACCEPTED" (no verdict fields leaked)
+    document.getElementById('dispModelResponse').textContent = `Red Turn: ${redTurnData.phase} (Attack payload submitted to broker mediation)`;
+    updateStepperUI('MODEL_INFERENCE');
+    await sleep(400);
+    updateStepperUI('EVAL');
+    await sleep(400);
 
-  // Update Checklist
-  updateChecklistUI(turnData.integrityVerdict);
-  document.getElementById('lblCanaryStatus').textContent = turnData.integrityVerdict.checklist.factor1_canaryPassed ? 'Passed (Clean)' : 'Failed (Deviation)';
-  document.getElementById('lblCanaryStatus').className = turnData.integrityVerdict.checklist.factor1_canaryPassed ? 'v green' : 'v red';
+    // 4. GET /model-output with blue key, show in "model response" box
+    updateStepperUI('BLUE_TURN');
+    const rawModelOut = await api(`/api/sessions/${activeSessionId}/model-output`, {
+      method: 'GET',
+      role: 'blue'
+    });
+    const modelOutData = parseModelOutputResponse(rawModelOut);
+    document.getElementById('dispModelResponse').textContent = modelOutData.modelOutput || '[Normalized model response received by broker]';
 
-  await sleep(700);
+    await sleep(400);
 
-  // Phase 5: BLUE_TURN
-  updateStepperUI('BLUE_TURN');
-  const resBlue = await fetch(`/api/sessions/${activeSessionId}/blue-turn`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ modelOutput: 'simulated output', token: activeSessionTokens.blue })
-  });
-  const blueData = await resBlue.json();
+    // 5. blue-turn with blue key (and blue capability token)
+    await api(`/api/sessions/${activeSessionId}/blue-turn`, {
+      method: 'POST',
+      body: { token: activeSessionTokens.blue, verdict: 'SAFE' },
+      role: 'blue',
+      token: activeSessionTokens.blue
+    });
+    document.getElementById('lblWorkerStatus').textContent = 'Worker: DESTROYED';
 
-  document.getElementById('lblWorkerStatus').textContent = 'Worker: DESTROYED';
+    await sleep(400);
 
-  await sleep(500);
+    // 6. GET /coarse-status with red key
+    updateStepperUI('CONCLUDE');
+    await api(`/api/sessions/${activeSessionId}/coarse-status`, {
+      method: 'GET',
+      role: 'red',
+      token: activeSessionTokens.red
+    });
 
-  // Phase 6 & 7: CONCLUDE & DISCLOSURE
-  updateStepperUI('CONCLUDE');
-  await sleep(400);
+    await sleep(400);
 
-  updateStepperUI('DISCLOSURE');
-  const resDisc = await fetch(`/api/sessions/${activeSessionId}/disclosure`, {
-    headers: { 'Authorization': JSON.stringify(activeSessionTokens.blue) }
-  });
-  const discData = await resDisc.json();
+    // 7. GET /disclosure with blue key and Authorization: Bearer <token>
+    updateStepperUI('DISCLOSURE');
+    const rawDisc = await api(`/api/sessions/${activeSessionId}/disclosure`, {
+      method: 'GET',
+      role: 'blue',
+      token: activeSessionTokens.blue
+    });
+    const discData = parseDisclosureResponse(rawDisc);
 
-  document.getElementById('lblDisclosurePolicy').textContent = discData.disclosurePolicy;
-  document.getElementById('dispDisclosurePayload').textContent = discData.disclosedAttackPayload || '[REDACTED]';
+    document.getElementById('lblDisclosurePolicy').textContent = discData.disclosurePolicy;
+    document.getElementById('dispDisclosurePayload').textContent = discData.disclosedAttackPayload || '[REDACTED]';
 
-  fetchSystemStatus();
+    // Show integrity verdict ONLY from disclosure bundle (certifiedIntegrity)
+    if (discData.certifiedIntegrity) {
+      updateChecklistUI(discData.certifiedIntegrity);
+      const canaryPassed = discData.certifiedIntegrity.checklist?.factor1_canaryPassed;
+      document.getElementById('lblCanaryStatus').textContent = canaryPassed ? 'Passed (Clean)' : 'Failed (Deviation)';
+      document.getElementById('lblCanaryStatus').className = canaryPassed ? 'v green' : 'v red';
+    }
+
+    fetchSystemStatus();
+  } catch (err) {
+    alert(formatApiError(err));
+    console.error('Session flow error:', err);
+  }
 }
 
 async function stepSessionFlow() {
-  if (!activeSessionId) {
-    // Start session
-    const policy = document.getElementById('sessionDisclosurePolicy').value;
-    const resSetup = await fetch('/api/sessions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ disclosurePolicy: policy })
-    });
-    const setupData = await resSetup.json();
-    activeSessionId = setupData.sessionId;
-    activeSessionTokens.red = setupData.redToken;
-    activeSessionTokens.blue = setupData.blueToken;
-    document.getElementById('lblSessionId').textContent = activeSessionId;
-    document.getElementById('lblWorkerId').textContent = setupData.dedicatedWorkerId;
-    document.getElementById('lblWorkerStatus').textContent = 'Worker: INITIALIZED';
-    updateStepperUI('SETUP');
-    currentPhaseIndex = 1;
-    return;
-  }
+  try {
+    if (!activeSessionId) {
+      // Step 1: SETUP
+      const policy = document.getElementById('sessionDisclosurePolicy').value;
+      const rawSetup = await api('/api/sessions', {
+        method: 'POST',
+        body: { disclosurePolicy: policy },
+        role: 'admin'
+      });
+      const setupData = parseSessionSetupResponse(rawSetup);
+      activeSessionId = setupData.sessionId;
 
-  if (currentPhaseIndex === 1) {
-    updateStepperUI('RED_TURN');
-    currentPhaseIndex = 2;
-    return;
-  }
+      const rawRedToken = await api(`/api/sessions/${activeSessionId}/token`, { method: 'POST', role: 'red' });
+      activeSessionTokens.red = parseSessionTokenResponse(rawRedToken).token;
 
-  if (currentPhaseIndex === 2) {
-    updateStepperUI('MODEL_INFERENCE');
-    const payloadText = document.getElementById('txtAttackPayload').value;
-    const resTurn = await fetch(`/api/sessions/${activeSessionId}/red-turn`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ payloadText, token: activeSessionTokens.red })
-    });
-    const turnData = await resTurn.json();
-    document.getElementById('dispModelResponse').textContent = JSON.stringify(turnData, null, 2);
-    updateChecklistUI(turnData.integrityVerdict);
-    currentPhaseIndex = 3;
-    return;
-  }
+      const rawBlueToken = await api(`/api/sessions/${activeSessionId}/token`, { method: 'POST', role: 'blue' });
+      activeSessionTokens.blue = parseSessionTokenResponse(rawBlueToken).token;
 
-  if (currentPhaseIndex === 3) {
-    updateStepperUI('BLUE_TURN');
-    await fetch(`/api/sessions/${activeSessionId}/blue-turn`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ modelOutput: 'simulated output', token: activeSessionTokens.blue })
-    });
-    document.getElementById('lblWorkerStatus').textContent = 'Worker: DESTROYED';
-    currentPhaseIndex = 4;
-    return;
-  }
+      document.getElementById('lblSessionId').textContent = activeSessionId;
+      document.getElementById('lblWorkerId').textContent = 'Dedicated Kata worker bound to ' + activeSessionId.slice(0, 12);
+      document.getElementById('lblWorkerStatus').textContent = 'Worker: INITIALIZED';
+      updateStepperUI('SETUP');
+      currentPhaseIndex = 1;
+      return;
+    }
 
-  if (currentPhaseIndex === 4) {
-    updateStepperUI('DISCLOSURE');
-    const resDisc = await fetch(`/api/sessions/${activeSessionId}/disclosure`, {
-      headers: { 'Authorization': JSON.stringify(activeSessionTokens.blue) }
-    });
-    const discData = await resDisc.json();
-    document.getElementById('dispDisclosurePayload').textContent = discData.disclosedAttackPayload || '[REDACTED]';
-    activeSessionId = null;
-    currentPhaseIndex = 0;
-    fetchSystemStatus();
+    if (currentPhaseIndex === 1) {
+      // Step 2: RED_TURN
+      updateStepperUI('RED_TURN');
+      const payloadText = document.getElementById('txtAttackPayload').value;
+      const rawRedTurn = await api(`/api/sessions/${activeSessionId}/red-turn`, {
+        method: 'POST',
+        body: { payloadText, token: activeSessionTokens.red },
+        role: 'red',
+        token: activeSessionTokens.red
+      });
+      const redTurnData = parseRedTurnResponse(rawRedTurn);
+      document.getElementById('dispModelResponse').textContent = `Red Turn: ${redTurnData.phase} (Payload submitted)`;
+      updateStepperUI('MODEL_INFERENCE');
+      currentPhaseIndex = 2;
+      return;
+    }
+
+    if (currentPhaseIndex === 2) {
+      // Step 3: EVAL / BLUE_TURN preparation
+      updateStepperUI('BLUE_TURN');
+      const rawModelOut = await api(`/api/sessions/${activeSessionId}/model-output`, {
+        method: 'GET',
+        role: 'blue'
+      });
+      const modelOutData = parseModelOutputResponse(rawModelOut);
+      document.getElementById('dispModelResponse').textContent = modelOutData.modelOutput || '[Normalized model response]';
+
+      await api(`/api/sessions/${activeSessionId}/blue-turn`, {
+        method: 'POST',
+        body: { token: activeSessionTokens.blue, verdict: 'SAFE' },
+        role: 'blue',
+        token: activeSessionTokens.blue
+      });
+      document.getElementById('lblWorkerStatus').textContent = 'Worker: DESTROYED';
+      currentPhaseIndex = 3;
+      return;
+    }
+
+    if (currentPhaseIndex === 3) {
+      // Step 4: CONCLUDE / Coarse Status
+      updateStepperUI('CONCLUDE');
+      await api(`/api/sessions/${activeSessionId}/coarse-status`, {
+        method: 'GET',
+        role: 'red',
+        token: activeSessionTokens.red
+      });
+      currentPhaseIndex = 4;
+      return;
+    }
+
+    if (currentPhaseIndex === 4) {
+      // Step 5: DISCLOSURE
+      updateStepperUI('DISCLOSURE');
+      const rawDisc = await api(`/api/sessions/${activeSessionId}/disclosure`, {
+        method: 'GET',
+        role: 'blue',
+        token: activeSessionTokens.blue
+      });
+      const discData = parseDisclosureResponse(rawDisc);
+      document.getElementById('dispDisclosurePayload').textContent = discData.disclosedAttackPayload || '[REDACTED]';
+
+      if (discData.certifiedIntegrity) {
+        updateChecklistUI(discData.certifiedIntegrity);
+      }
+
+      activeSessionId = null;
+      currentPhaseIndex = 0;
+      fetchSystemStatus();
+    }
+  } catch (err) {
+    alert(formatApiError(err));
+    console.error('Step flow error:', err);
   }
 }
 
@@ -544,23 +855,28 @@ function resetSessionUI() {
 
   for (let i = 1; i <= 5; i++) {
     const row = document.getElementById(`chkFactor${i}`);
-    row.className = 'check-row';
-    row.querySelector('.check-icon').textContent = '⚪';
-    row.querySelector('.check-status').textContent = 'Pending';
+    if (row) {
+      row.className = 'check-row';
+      row.querySelector('.check-icon').textContent = '⚪';
+      row.querySelector('.check-status').textContent = 'Pending';
+    }
   }
 }
 
 function updateChecklistUI(integrityVerdict) {
+  if (!integrityVerdict) return;
   const badge = document.getElementById('lblIntegrityBadge');
-  if (integrityVerdict.certified) {
-    badge.className = 'badge-certified certified';
-    badge.textContent = 'CERTIFIED SAFETY FINDING';
-  } else {
-    badge.className = 'badge-certified downgraded';
-    badge.textContent = integrityVerdict.verdict;
+  if (badge) {
+    if (integrityVerdict.certified) {
+      badge.className = 'badge-certified certified';
+      badge.textContent = 'CERTIFIED SAFETY FINDING';
+    } else {
+      badge.className = 'badge-certified downgraded';
+      badge.textContent = integrityVerdict.verdict || 'UNVERIFIED';
+    }
   }
 
-  const checklist = integrityVerdict.checklist;
+  const checklist = integrityVerdict.checklist || {};
   setCheckRow('chkFactor1', checklist.factor1_canaryPassed);
   setCheckRow('chkFactor2', checklist.factor2_hashesVerified);
   setCheckRow('chkFactor3', checklist.factor3_infraClean);
@@ -589,7 +905,7 @@ function initAttackLab() {
   document.querySelectorAll('.btn-run-sim').forEach(btn => {
     btn.addEventListener('click', () => {
       const simId = btn.getAttribute('data-sim');
-      if (simId) window.runAttackSim(simId);
+      if (simId) rootScope.runAttackSim(simId);
     });
   });
 
@@ -618,8 +934,7 @@ function initAttackLab() {
   rootScope.runAttackSim = async (simId) => {
     logTerminal('info', `[DISPATCH] Invoking attack probe: ${simId.toUpperCase()}...`);
     try {
-      const res = await fetch(`/api/attack-sims/${simId}/run`, { method: 'POST' });
-      const data = await res.json();
+      const data = await api(`/api/attack-sims/${simId}/run`, { method: 'POST', role: 'admin' });
 
       const statusEl = document.getElementById(`status${simId.replace('sim-', 'Sim')}`);
 
@@ -659,13 +974,15 @@ function initAttackLab() {
 
       fetchSystemStatus();
     } catch (err) {
-      logTerminal('deny', `[ERROR] Failed to execute ${simId}: ${err.message}`);
+      const friendly = formatApiError(err, `/api/attack-sims/${simId}/run`);
+      logTerminal('deny', `[ERROR] Failed to execute ${simId}: ${friendly}`);
     }
   };
 }
 
 function logTerminal(type, message) {
   const terminal = document.getElementById('terminalBody');
+  if (!terminal) return;
   const line = document.createElement('div');
   line.className = `term-line ${type}`;
   line.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
@@ -678,71 +995,68 @@ function logTerminal(type, message) {
 // -------------------------------------------------------------
 function initAuditExplorer() {
   document.getElementById('btnVerifyAudit').addEventListener('click', async () => {
-    const res = await fetch('/api/audit/integrity');
-    const data = await res.json();
+    try {
+      const data = await api('/api/audit/integrity', { role: 'auditor' });
 
-    const statusEl = document.getElementById('lblChainStatus');
-    if (data.isValid) {
-      statusEl.className = 'val badge-status valid';
-      statusEl.textContent = 'VERIFIED CLEAN (100% INTACT)';
-      alert(`Audit Log Verified: All ${data.totalEntries} blocks match SHA-256 hash chain and Merkle roots!`);
-    } else {
-      statusEl.className = 'val badge-status tampered';
-      statusEl.textContent = 'TAMPER DETECTED!';
-      alert(`CRITICAL ALERT: Tamper detected at Block #${data.brokenChainAt}! Hash chain broken!`);
+      const statusEl = document.getElementById('lblChainStatus');
+      if (data.isValid) {
+        statusEl.className = 'val badge-status valid';
+        statusEl.textContent = 'VERIFIED CLEAN (100% INTACT)';
+        alert(`Audit Log Verified: All ${data.totalEntries} blocks match SHA-256 hash chain and Merkle roots!`);
+      } else {
+        statusEl.className = 'val badge-status tampered';
+        statusEl.textContent = 'TAMPER DETECTED!';
+        alert(`CRITICAL ALERT: Tamper detected at Block #${data.brokenChainAt}! Hash chain broken!`);
+      }
+      fetchSystemStatus();
+    } catch (err) {
+      alert(formatApiError(err, '/api/audit/integrity'));
     }
-    fetchSystemStatus();
   });
 
   document.getElementById('btnTriggerTamper').addEventListener('click', async () => {
     const blockIndex = prompt('Enter block index to tamper with (e.g. 1):', '1');
     if (blockIndex === null) return;
 
-    const res = await fetch('/api/audit/tamper', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        blockIndex: parseInt(blockIndex, 10),
-        field: 'eventType',
-        newValue: 'MALICIOUS_UNAUDITED_EDIT'
-      })
-    });
+    try {
+      await api('/api/audit/tamper', {
+        method: 'POST',
+        role: 'admin',
+        body: {
+          blockIndex: parseInt(blockIndex, 10),
+          field: 'eventType',
+          newValue: 'MALICIOUS_UNAUDITED_EDIT'
+        }
+      });
 
-    const data = await res.json();
-    alert(`Injected tamper into Block #${blockIndex}! Cryptographic hash chain is now broken.`);
-    loadAuditChain();
-    fetchSystemStatus();
+      alert(`Injected tamper into Block #${blockIndex}! Cryptographic hash chain is now broken.`);
+      loadAuditChain();
+      fetchSystemStatus();
+    } catch (err) {
+      alert(formatApiError(err, '/api/audit/tamper'));
+    }
   });
 
   document.getElementById('btnRestoreAudit').addEventListener('click', async () => {
-    await fetch('/api/platform/reset', { method: 'POST' });
-    alert('Golden audit chain restored.');
-    loadAuditChain();
-    fetchSystemStatus();
+    try {
+      await api('/api/platform/reset', { method: 'POST', role: 'admin' });
+      alert('Golden audit chain restored.');
+      loadAuditChain();
+      fetchSystemStatus();
+    } catch (err) {
+      alert(formatApiError(err, '/api/platform/reset'));
+    }
   });
 }
 
 async function loadAuditChain() {
   const container = document.getElementById('auditChainContainer');
+  if (!container) return;
   container.innerHTML = '<div style="color:#64748b; padding:1rem;">Loading hash chain...</div>';
 
   try {
-    const res = await fetch(`/api/audit?role=${encodeURIComponent(currentRole)}`);
-    if (!res.ok) {
-      const err = await res.json();
-      container.innerHTML = `
-        <div class="panel glass-card" style="padding: 1.5rem; border-color: rgba(239, 68, 68, 0.4);">
-          <h4 style="color:#f87171; margin-bottom:0.5rem;">Access Denied by Information-Flow Policy</h4>
-          <p class="desc-text">${esc(err.error || err.message)}</p>
-          <p style="font-size:0.8rem; color:#94a3b8;">Rule (§M): Sandboxes are WRITE-ONLY sinks to prevent audit store from acting as a cross-tenant covert channel. Switch to 'Auditor' or 'Broker' role above to view.</p>
-        </div>
-      `;
-      return;
-    }
-
-    const data = await res.json();
-    const intRes = await fetch('/api/audit/integrity');
-    const intData = await intRes.json();
+    const data = await api('/api/audit', { role: 'auditor' });
+    const intData = await api('/api/audit/integrity', { role: 'auditor' });
 
     document.getElementById('lblMerkleRoot').textContent = data.merkleRoot;
 
@@ -779,7 +1093,14 @@ async function loadAuditChain() {
       container.appendChild(card);
     });
   } catch (err) {
-    container.innerHTML = `<div style="color:#f87171; padding:1rem;">Failed to load audit chain: ${esc(err.message)}</div>`;
+    const friendly = formatApiError(err, '/api/audit');
+    container.innerHTML = `
+      <div class="panel glass-card" style="padding: 1.5rem; border-color: rgba(239, 68, 68, 0.4);">
+        <h4 style="color:#f87171; margin-bottom:0.5rem;">Access Denied by Information-Flow Policy</h4>
+        <p class="desc-text">${esc(friendly)}</p>
+        <p style="font-size:0.8rem; color:#94a3b8;">Rule (§M): Sandboxes are WRITE-ONLY sinks to prevent audit store from acting as a cross-tenant covert channel. Configure Auditor API key above to view.</p>
+      </div>
+    `;
   }
 }
 
@@ -789,6 +1110,7 @@ async function loadAuditChain() {
 function initSideChannelGuard() {
   const numInput = document.getElementById('numRawLatency');
   const btnCalc = document.getElementById('btnCalculateBucket');
+  if (!numInput || !btnCalc) return;
 
   btnCalc.addEventListener('click', () => {
     const raw = parseInt(numInput.value, 10) || 100;
@@ -802,8 +1124,9 @@ function initSideChannelGuard() {
 // PoC Demonstration Suite Table (§S)
 // -------------------------------------------------------------
 function initPocSuite() {
-  document.getElementById('btnRunPocTests').addEventListener('click', async () => {
-    const btn = document.getElementById('btnRunPocTests');
+  const btn = document.getElementById('btnRunPocTests');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
     btn.disabled = true;
     btn.textContent = 'Running 9 Tests...';
     await loadPocTable();
@@ -814,11 +1137,11 @@ function initPocSuite() {
 
 async function loadPocTable() {
   const tbody = document.getElementById('tbodyPoc');
+  if (!tbody) return;
   tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding:1rem; color:#64748b;">Executing live tests...</td></tr>';
 
   try {
-    const res = await fetch('/api/poc-tests');
-    const data = await res.json();
+    const data = await api('/api/poc-tests', { role: 'admin' });
 
     const mechanisms = {
       'POC-TEST-01': 'Cilium eBPF Default-Deny & Vault mTLS Identity (Modeled CNI)',
@@ -845,7 +1168,8 @@ async function loadPocTable() {
       tbody.appendChild(tr);
     });
   } catch (err) {
-    tbody.innerHTML = `<tr><td colspan="5" style="color:#f87171; padding:1rem;">Failed to run PoC tests: ${esc(err.message)}</td></tr>`;
+    const friendly = formatApiError(err, '/api/poc-tests');
+    tbody.innerHTML = `<tr><td colspan="5" style="color:#f87171; padding:1rem;">Failed to run PoC tests: ${esc(friendly)}</td></tr>`;
   }
 }
 
@@ -866,8 +1190,7 @@ async function loadDatasetsHub() {
   grid.innerHTML = '<div style="color:#64748b; padding:1rem;">Loading benchmark datasets...</div>';
 
   try {
-    const res = await fetch('/api/datasets');
-    const data = await res.json();
+    const data = await api('/api/datasets', { role: null });
 
     grid.innerHTML = '';
     data.datasets.forEach(ds => {
@@ -892,13 +1215,12 @@ async function loadDatasetsHub() {
       `;
 
       card.querySelector('.btn-inspect-dataset').addEventListener('click', () => {
-        window.inspectDataset(ds.id);
+        rootScope.inspectDataset(ds.id);
       });
 
       grid.appendChild(card);
     });
 
-    // Default inspect first dataset
     if (data.datasets.length > 0) {
       rootScope.inspectDataset(data.datasets[0].id);
     }
@@ -909,8 +1231,7 @@ async function loadDatasetsHub() {
 
 rootScope.inspectDataset = async (datasetId) => {
   try {
-    const res = await fetch(`/api/datasets/${encodeURIComponent(datasetId)}`);
-    const ds = await res.json();
+    const ds = await api(`/api/datasets/${encodeURIComponent(datasetId)}`, { role: null });
 
     document.getElementById('datasetInspectorTitle').textContent = `Dataset Inspector: ${ds.name}`;
     document.getElementById('datasetInspectorCategory').textContent = ds.category;
@@ -958,12 +1279,23 @@ rootScope.loadSampleIntoRunner = (prompt) => {
   const txtArea = document.getElementById('txtAttackPayload');
   if (txtArea) txtArea.value = prompt;
 
-  // Switch to Session Runner tab
   const sessionTabBtn = document.querySelector('[data-tab="tab-session"]');
   if (sessionTabBtn) sessionTabBtn.click();
 };
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { esc, annotateJargon, JARGON_GLOSSARY };
+  module.exports = {
+    esc,
+    annotateJargon,
+    JARGON_GLOSSARY,
+    apiKeys,
+    parseSessionSetupResponse,
+    parseSessionTokenResponse,
+    parseRedTurnResponse,
+    parseModelOutputResponse,
+    parseBlueTurnResponse,
+    parseCoarseStatusResponse,
+    parseDisclosureResponse,
+    formatApiError
+  };
 }
-

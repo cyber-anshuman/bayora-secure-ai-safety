@@ -1,7 +1,7 @@
 const assert = require('assert');
 const crypto = require('crypto');
 const { RedSandbox, BlueSandbox } = require('../src/sandboxes/tenant_sandboxes');
-const { runInIsolatedWorker, DEFAULT_RESOURCE_LIMITS } = require('../src/sandboxes/worker_isolation');
+const { runInIsolatedWorker } = require('../src/sandboxes/worker_isolation');
 
 async function runWorkerIsolationTest() {
   console.log('Running Real Runtime Isolation Unit Tests (worker_threads, Section H partial)...');
@@ -15,8 +15,8 @@ async function runWorkerIsolationTest() {
   };
   const stubVault = {};
   const stubBroker = {
-    processRedTurn: async (sessionId, payloadText, token) => ({ sessionId, payloadText, phase: 'INFERENCE' }),
-    processBlueTurn: async (sessionId, result, token) => ({ sessionId, result, phase: 'CONCLUDE' })
+    processRedTurn: async (sessionId, payloadText, _token) => ({ sessionId, payloadText, phase: 'INFERENCE' }),
+    processBlueTurn: async (sessionId, result, _token) => ({ sessionId, result, phase: 'CONCLUDE' })
   };
 
   const red = new RedSandbox(stubBroker, stubAudit, stubOpa, stubVault);

@@ -27,6 +27,10 @@ class VaultAuthority {
       throw new Error('Refusing to start: VAULT_SECRET environment variable is required and must be at least 32 characters');
     }
 
+    if (nodeEnv === 'production' && this.secretKey === 'bayora_production_vault_secret_min_32_characters_long') {
+      throw new Error('Refusing to start in production: Insecure known-example secret detected for VAULT_SECRET. Generate a production secret using \'openssl rand -hex 32\'.');
+    }
+
     this.activeTokens = new Map();
     this.revokedTokens = new Set();
     this.defaultTtlMs = Number(process.env.VAULT_TOKEN_TTL_MS) || (15 * 60 * 1000);
@@ -70,7 +74,8 @@ class VaultAuthority {
 
   _sign(payload) {
     const actions = Array.isArray(payload.allowedActions) ? [...payload.allowedActions].sort().join(',') : '';
-    const data = `${payload.tokenId}:${payload.tenantId}:${payload.sessionId}:${actions}:${payload.issuedAt}:${payload.expiresAt}`;
+    const initial = payload.initialIssuedAt || payload.issuedAt || 0;
+    const data = `${payload.tokenId}:${payload.tenantId}:${payload.sessionId}:${actions}:${payload.issuedAt}:${payload.expiresAt}:${initial}`;
     return crypto.createHmac('sha256', this.secretKey).update(data).digest('hex');
   }
 
@@ -169,7 +174,8 @@ class VaultAuthority {
       return { success: false, reason: validation.reason };
     }
 
-    const initialIssuedAt = token.initialIssuedAt || token.issuedAt || Date.now();
+    const active = this.activeTokens.get(token.tokenId);
+    const initialIssuedAt = (active && active.initialIssuedAt) || token.initialIssuedAt || token.issuedAt || Date.now();
     if (Date.now() - initialIssuedAt > this.maxLifetimeMs) {
       return { success: false, reason: 'E_MAX_LIFETIME_EXCEEDED: Token has exceeded VAULT_MAX_LIFETIME_MS' };
     }

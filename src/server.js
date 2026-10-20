@@ -59,7 +59,6 @@ let vaultAuthority = new VaultAuthority();
 let broker = new BrokerStateMachine(auditStore, opaPdp, vaultAuthority);
 let redSandbox = new RedSandbox(broker, auditStore, opaPdp, vaultAuthority);
 let blueSandbox = new BlueSandbox(broker, auditStore, opaPdp, vaultAuthority);
-let simulationSuite = new AttackSimulationSuite();
 
 let lastIntegrityCheckTime = 0;
 let cachedAuditReport = null;
@@ -82,7 +81,6 @@ function resetPlatform() {
   broker = new BrokerStateMachine(auditStore, opaPdp, vaultAuthority);
   redSandbox = new RedSandbox(broker, auditStore, opaPdp, vaultAuthority);
   blueSandbox = new BlueSandbox(broker, auditStore, opaPdp, vaultAuthority);
-  simulationSuite = new AttackSimulationSuite();
 }
 
 // -------------------------------------------------------------
@@ -114,7 +112,7 @@ app.get('/api/status', (req, res) => {
 // Session Lifecycle & State Machine API
 // -------------------------------------------------------------
 
-// Helper to extract capability token from request
+// Helper to extract capability token from request (header only)
 function extractCapabilityToken(req) {
   const tokenHeader = req.headers['authorization'] || req.headers['x-capability-token'];
   if (tokenHeader) {
@@ -125,13 +123,6 @@ function extractCapabilityToken(req) {
       return JSON.parse(clean);
     } catch (e) {
       return { tokenId: tokenHeader };
-    }
-  }
-  if (req.query && req.query.token) {
-    try {
-      return JSON.parse(req.query.token);
-    } catch (e) {
-      return { tokenId: req.query.token };
     }
   }
   return null;
@@ -215,7 +206,8 @@ app.post('/api/sessions/:id/token', requireAuth, async (req, res) => {
 app.post('/api/sessions/:id/red-turn', requireRole('red', 'admin'), async (req, res) => {
   const startHrTime = process.hrtime.bigint();
   try {
-    const { payloadText, token } = req.body || {};
+    const token = extractCapabilityToken(req) || (req.body && req.body.token);
+    const { payloadText } = req.body || {};
     const sessionId = req.params.id;
 
     const result = await redSandbox.submitAttack(sessionId, payloadText, token);
@@ -231,6 +223,22 @@ app.get('/api/sessions/:id/coarse-status', requireRole('red', 'admin'), async (r
   const startHrTime = process.hrtime.bigint();
   try {
     const sessionId = req.params.id;
+    const token = extractCapabilityToken(req) || (req.body && req.body.token);
+
+    if (!token) {
+      const err = new Error('Vault Deny: TOKEN_MISSING');
+      err.code = 'E_AUTH_FAILED';
+      return await sendCanonicalError(res, err, startHrTime);
+    }
+
+    // Check capability token BEFORE phase check
+    const capCheck = vaultAuthority.validateCapability(token, 'read_coarse_status', sessionId, req.role === 'admin' ? null : 'red');
+    if (!capCheck.valid) {
+      const err = new Error(`Vault Deny: ${capCheck.reason}`);
+      err.code = 'E_AUTH_FAILED';
+      return await sendCanonicalError(res, err, startHrTime);
+    }
+
     const session = broker.sessions.get(sessionId);
     if (!session) {
       return await sendCanonicalError(res, new Error('E_SESSION_NOT_FOUND'), startHrTime);
@@ -241,6 +249,9 @@ app.get('/api/sessions/:id/coarse-status', requireRole('red', 'admin'), async (r
       err.code = 'E_STATE_MACHINE_ERROR';
       return await sendCanonicalError(res, err, startHrTime);
     }
+
+    // Consumed only on success
+    vaultAuthority.consumeAction(token, 'read_coarse_status');
 
     const passed = session.modelResponse ? !session.modelResponse.isJailbreak : true;
     await sideChannelMitigations.delayUntilNextBucket(startHrTime);
@@ -272,7 +283,8 @@ app.get('/api/sessions/:id/model-output', requireRole('blue', 'admin'), async (r
 app.post('/api/sessions/:id/blue-turn', requireRole('blue', 'admin'), async (req, res) => {
   const startHrTime = process.hrtime.bigint();
   try {
-    const { token, ...params } = req.body || {};
+    const token = extractCapabilityToken(req) || (req.body && req.body.token);
+    const { ...params } = req.body || {};
     const sessionId = req.params.id;
 
     const result = await blueSandbox.evaluateDefense(sessionId, params, token);
@@ -291,11 +303,9 @@ app.get('/api/sessions/:id/disclosure', requireRole('blue', 'admin'), async (req
     const token = extractCapabilityToken(req);
 
     if (!token) {
-      await sideChannelMitigations.delayUntilNextBucket(startHrTime);
-      return res.status(401).json({
-        error: 'Authentication failed: Missing capability token for disclosure bundle',
-        code: 'E_TOKEN_MISSING'
-      });
+      const err = new Error('Vault Deny: TOKEN_MISSING');
+      err.code = 'E_AUTH_FAILED';
+      return await sendCanonicalError(res, err, startHrTime);
     }
 
     const bundle = await broker.getDisclosureBundle(sessionId, token);
@@ -314,11 +324,9 @@ app.get('/api/sessions/:id/red-payload-query', requireRole('blue', 'admin'), asy
     const token = extractCapabilityToken(req);
 
     if (!token) {
-      await sideChannelMitigations.delayUntilNextBucket(startHrTime);
-      return res.status(401).json({
-        error: 'Authentication failed: Missing capability token for red payload query',
-        code: 'E_TOKEN_MISSING'
-      });
+      const err = new Error('Vault Deny: TOKEN_MISSING');
+      err.code = 'E_AUTH_FAILED';
+      return await sendCanonicalError(res, err, startHrTime);
     }
 
     const result = broker.queryRedPayload(sessionId, token);
@@ -343,14 +351,21 @@ app.get('/api/sessions/:id/red-payload-query', requireRole('blue', 'admin'), asy
 app.get('/api/audit', requireRole('auditor', 'admin'), (req, res) => {
   const role = req.role;
   const sessionId = req.query.sessionId;
+  const limit = Math.min(1000, Math.max(1, parseInt(req.query.limit, 10) || 200));
+  const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
 
   try {
-    const records = auditStore.query(role, { sessionId });
+    const allRecords = auditStore.query(role, { sessionId });
+    const pagedRecords = allRecords.slice(offset, offset + limit);
+    const latestAnchor = auditStore.anchors.length > 0 ? auditStore.anchors[auditStore.anchors.length - 1] : null;
     res.json({
-      records,
-      totalCount: records.length,
+      records: pagedRecords,
+      totalCount: allRecords.length,
+      limit,
+      offset,
       merkleRoot: auditStore.getMerkleRoot(),
-      anchors: auditStore.anchors
+      latestAnchor,
+      anchorCount: auditStore.anchors.length
     });
   } catch (err) {
     res.status(403).json({ error: err.message, code: 'E_AUDIT_WRITE_ONLY' });
@@ -358,12 +373,13 @@ app.get('/api/audit', requireRole('auditor', 'admin'), (req, res) => {
 });
 
 // Check cryptographic integrity of audit chain (Auditor only)
-app.get('/api/audit/integrity', requireRole('auditor', 'admin'), (req, res) => {
-  const report = auditStore.verifyIntegrity();
+app.get('/api/audit/integrity', requireRole('auditor', 'admin'), async (req, res) => {
+  const report = await auditStore.verifyIntegrityAsync();
+  const latestAnchor = auditStore.anchors.length > 0 ? auditStore.anchors[auditStore.anchors.length - 1] : null;
   res.json({
     ...report,
     currentMerkleRoot: auditStore.getMerkleRoot(),
-    anchoredRoot: auditStore.anchors.length > 0 ? auditStore.anchors[auditStore.anchors.length - 1].merkleRoot : null
+    anchoredRoot: latestAnchor ? latestAnchor.merkleRoot : null
   });
 });
 

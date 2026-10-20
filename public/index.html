@@ -57,14 +57,49 @@
       </div>
 
       <!-- Active Role Perspective Dropdown with Tooltip -->
-      <div class="role-select-container" id="roleSelectWrap" title="Broker View: Full mediation authority, OPA PDP policy checking, and capability verification.">
-        <label for="roleSelect" class="role-select-label">Perspective:</label>
+      <div class="role-select-container" id="roleSelectWrap" title="Select active authentication key role.">
+        <label for="roleSelect" class="role-select-label">Active Key / Role:</label>
         <select id="roleSelect" class="role-dropdown">
-          <option value="broker" selected>🛡️ Broker (Orchestrator)</option>
-          <option value="red">🔴 Red Team Sandbox</option>
-          <option value="blue">🔵 Blue Team Sandbox</option>
+          <option value="admin" selected>🛡️ Admin / Broker</option>
+          <option value="red">🔴 Red Team</option>
+          <option value="blue">🔵 Blue Team</option>
           <option value="auditor">📜 Security Auditor</option>
         </select>
+      </div>
+
+      <!-- In-Memory API Keys Panel Dropdown -->
+      <div class="status-summary-dropdown" id="apiKeysDropdown" style="position: relative;">
+        <button class="status-summary-btn" id="apiKeysBtn" aria-haspopup="true" aria-expanded="false" title="Configure in-memory API keys for authentication">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 2l-2 2m-2-2l2 2M3 14l3-3m0 0l3 3m-3-3v8a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-4m-8-4l7-7a2.828 2.828 0 1 1 4 4l-7 7m-4-4l-3 3"/>
+          </svg>
+          <span id="apiKeysBtnText">API Keys</span>
+          <span class="dropdown-caret">▾</span>
+        </button>
+        <div class="status-popover keys-popover" id="apiKeysPopover" role="menu" style="min-width: 290px;">
+          <div style="font-weight: 700; font-size: 0.8rem; margin-bottom: 0.5rem; color: var(--ink-primary); border-bottom: 1px solid var(--rule-subtle); padding-bottom: 0.35rem;">
+            In-Memory Authentication Keys
+          </div>
+          <div class="popover-row" style="flex-direction: column; align-items: flex-start; gap: 0.2rem;">
+            <label for="keyAdmin" class="popover-k">Admin API Key:</label>
+            <input type="password" id="keyAdmin" class="input-field key-input" placeholder="ADMIN_API_KEY" autocomplete="off" style="width: 100%; padding: 0.25rem 0.5rem; font-size: 0.75rem;">
+          </div>
+          <div class="popover-row" style="flex-direction: column; align-items: flex-start; gap: 0.2rem;">
+            <label for="keyRed" class="popover-k">Red API Key:</label>
+            <input type="password" id="keyRed" class="input-field key-input" placeholder="RED_API_KEY" autocomplete="off" style="width: 100%; padding: 0.25rem 0.5rem; font-size: 0.75rem;">
+          </div>
+          <div class="popover-row" style="flex-direction: column; align-items: flex-start; gap: 0.2rem;">
+            <label for="keyBlue" class="popover-k">Blue API Key:</label>
+            <input type="password" id="keyBlue" class="input-field key-input" placeholder="BLUE_API_KEY" autocomplete="off" style="width: 100%; padding: 0.25rem 0.5rem; font-size: 0.75rem;">
+          </div>
+          <div class="popover-row" style="flex-direction: column; align-items: flex-start; gap: 0.2rem;">
+            <label for="keyAuditor" class="popover-k">Auditor API Key:</label>
+            <input type="password" id="keyAuditor" class="input-field key-input" placeholder="AUDITOR_API_KEY" autocomplete="off" style="width: 100%; padding: 0.25rem 0.5rem; font-size: 0.75rem;">
+          </div>
+          <div style="font-size: 0.68rem; color: var(--ink-muted); margin-top: 0.4rem; line-height: 1.3;">
+            Stored in JS memory only (never written to localStorage).
+          </div>
+        </div>
       </div>
 
       <!-- Secondary Reset Button -->

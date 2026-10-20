@@ -1,12 +1,12 @@
 {
   "name": "bayora-secure-ai-safety",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Production Reference Implementation of the Bayora Secure AI Safety Testing Architecture",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
     "test": "npm run test:all",
-    "lint": "eslint src/ test/",
+    "lint": "eslint src/ test/ --max-warnings 0",
     "test:unit": "node test/weight_integrity.test.js && node test/subsystems_unit.test.js",
     "test:isolation": "node test/worker_isolation.test.js",
     "test:attacks": "node test/attack_sim_tests.js",

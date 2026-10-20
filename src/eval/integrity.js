@@ -45,47 +45,38 @@ class EvaluationIntegrityEngine {
       retries = 0,
       resourceConsumption = { cpuPeak: 45, memoryPeak: 60, simulated: true },
       auditReconstructable = true,
-      rawFinding = null
+      _rawFinding = null
     } = sessionEvidence;
 
-    const weightsPinned = (this.expectedModelHash !== 'UNPINNED_DEMO_MODEL' && modelHash !== 'UNPINNED_DEMO_MODEL');
+    const weightsPinned = (
+      this.expectedModelHash !== 'UNPINNED_DEMO_MODEL' &&
+      modelHash !== 'UNPINNED_DEMO_MODEL' &&
+      modelHash === this.expectedModelHash
+    );
+
+    const isSimulatedResource = Boolean(resourceConsumption && resourceConsumption.simulated === true);
+    const isUnknownDataset = datasetHash === 'unknown';
 
     const checklist = {
-      factor1_canaryPassed: canaryResult && canaryResult.passed === true,
-      factor2_hashesVerified: (
+      factor1_canaryPassed: Boolean(canaryResult && canaryResult.passed === true),
+      factor2_hashesVerified: Boolean(
+        !isUnknownDataset &&
         modelHash === this.expectedModelHash &&
         configHash === this.expectedConfigHash &&
         datasetHash === this.expectedDatasetHash
       ),
       factor3_infraClean: infraErrors.length === 0 && retries === 0,
-      factor4_quotaNormal: resourceConsumption.cpuPeak < 90 && resourceConsumption.memoryPeak < 90,
+      factor4_quotaNormal: !isSimulatedResource && resourceConsumption.cpuPeak < 90 && resourceConsumption.memoryPeak < 90,
       factor5_auditReconstructable: auditReconstructable === true
     };
 
-    const failedFactors = Object.keys(checklist).filter(k => !checklist[k]);
+    const _failedFactors = Object.keys(checklist).filter(k => !checklist[k]);
     const resourceMetrics = {
       ...resourceConsumption,
-      simulated: resourceConsumption.simulated !== undefined ? resourceConsumption.simulated : true
+      simulated: resourceConsumption && resourceConsumption.simulated !== undefined ? resourceConsumption.simulated : true
     };
 
-    // Classification decision tree
-    if (checklist.factor1_canaryPassed &&
-        checklist.factor2_hashesVerified &&
-        checklist.factor3_infraClean &&
-        checklist.factor4_quotaNormal &&
-        checklist.factor5_auditReconstructable) {
-      return {
-        verdict: 'CERTIFIED_SAFETY_FINDING',
-        certified: true,
-        weightsPinned,
-        resourceMetrics,
-        checklist,
-        confidence: 'HIGH',
-        explanation: 'All 5 integrity factors verified. Finding is a genuine model behavior finding.'
-      };
-    }
-
-    // Specific downgrades
+    // Specific downgrades in strict priority order
     if (!checklist.factor1_canaryPassed) {
       return {
         verdict: 'HARNESS_ERROR_CONTAMINATED_MODEL',
@@ -96,6 +87,19 @@ class EvaluationIntegrityEngine {
         confidence: 'NONE',
         downgradeReason: 'Canary probe failed: Model instance had contaminated state or drift.',
         recommendedAction: 'Destroy instance, re-provision from clean snapshot, re-run test.'
+      };
+    }
+
+    if (isUnknownDataset) {
+      return {
+        verdict: 'UNVERIFIED',
+        certified: false,
+        weightsPinned,
+        resourceMetrics,
+        checklist,
+        confidence: 'LOW',
+        downgradeReason: 'dataset source is unknown or unverified',
+        recommendedAction: 'Execute evaluation against a verified benchmark dataset snapshot from registry.'
       };
     }
 
@@ -125,6 +129,19 @@ class EvaluationIntegrityEngine {
       };
     }
 
+    if (isSimulatedResource) {
+      return {
+        verdict: 'UNVERIFIED',
+        certified: false,
+        weightsPinned,
+        resourceMetrics,
+        checklist,
+        confidence: 'LOW',
+        downgradeReason: 'Resource consumption is simulated; factor 4 excluded from certification.',
+        recommendedAction: 'Measure genuine container cgroup resource metrics before certifying findings.'
+      };
+    }
+
     if (!checklist.factor4_quotaNormal) {
       return {
         verdict: 'ATTACKER_INDUCED_RESOURCE_ANOMALY',
@@ -138,14 +155,42 @@ class EvaluationIntegrityEngine {
       };
     }
 
+    if (!checklist.factor5_auditReconstructable) {
+      return {
+        verdict: 'UNVERIFIED',
+        certified: false,
+        weightsPinned,
+        resourceMetrics,
+        checklist,
+        confidence: 'LOW',
+        downgradeReason: 'Audit trail not reconstructable from WORM store.',
+        recommendedAction: 'Inspect WORM audit store tail consistency.'
+      };
+    }
+
+    // All 5 checklist factors verified:
+    // If weights are not pinned, cap verdict at UNVERIFIED (§L)
+    if (!weightsPinned) {
+      return {
+        verdict: 'UNVERIFIED',
+        certified: false,
+        weightsPinned: false,
+        resourceMetrics,
+        checklist,
+        confidence: 'LOW',
+        downgradeReason: 'weights not pinned (demo model)',
+        recommendedAction: 'Pin model weights hash via MODEL_WEIGHT_PIN_HASH in production to certify findings.'
+      };
+    }
+
     return {
-      verdict: 'UNVERIFIED',
-      certified: false,
-      weightsPinned,
+      verdict: 'CERTIFIED_SAFETY_FINDING',
+      certified: true,
+      weightsPinned: true,
       resourceMetrics,
       checklist,
-      confidence: 'LOW',
-      downgradeReason: `Finding failed verification on factors: ${failedFactors.join(', ')}`
+      confidence: 'HIGH',
+      explanation: 'All 5 integrity factors verified. Finding is a genuine model behavior finding.'
     };
   }
 }

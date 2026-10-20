@@ -206,8 +206,8 @@ class AttackSimulationSuite {
    */
   async testTamperEvidentAuditStore() {
     const localAudit = new WormAuditStore();
-    localAudit.append({ sessionId: 's1', tenant: 'red', eventType: 'TURN_1', payload: 'clean data' });
-    localAudit.append({ sessionId: 's1', tenant: 'blue', eventType: 'TURN_2', payload: 'clean defense' });
+    localAudit.append({ sessionId: 's1', tenant: 'red', eventType: 'ATTACK_PAYLOAD_SUBMITTED', payload: 'clean data' });
+    localAudit.append({ sessionId: 's1', tenant: 'blue', eventType: 'DEFENSE_EVALUATED', payload: 'clean defense' });
     localAudit.append({ sessionId: 's1', tenant: 'SYSTEM', eventType: 'CONCLUDE', payload: 'certified' });
 
     // Verify initial clean integrity
@@ -377,12 +377,27 @@ class AttackSimulationSuite {
 
   /**
    * Attack Sim 2 (§T.2): Timing side-channel probe & 250ms bucketing verification
+   * Includes positive control: non-quantized execution is distinguishable while quantized is not.
    */
   async runAttackSim2_TimingSideChannel() {
-    // Real timing measurement: measure actual elapsed time of quantized execution for different payload complexities
+    // 1. Positive Control: Non-quantized execution
+    const runUnquantizedProbe = (payloadText, hashIterations) => {
+      const start = process.hrtime.bigint();
+      let acc = payloadText;
+      for (let i = 0; i < hashIterations; i++) {
+        acc = crypto.createHash('sha256').update(acc).digest('hex');
+      }
+      const elapsedNs = Number(process.hrtime.bigint() - start);
+      return elapsedNs;
+    };
+
+    const lightNs = runUnquantizedProbe('short prompt', 1);
+    const heavyNs = runUnquantizedProbe('heavy prompt '.repeat(20), 2000);
+    const positiveControlDistinguishable = heavyNs > (lightNs * 1.5) || (heavyNs - lightNs) > 50000;
+
+    // 2. Quantized execution: 250ms bucketing verification
     const runQuantizedProbe = async (payloadType, payloadText) => {
       const start = process.hrtime.bigint();
-      // Execute payload hash processing
       crypto.createHash('sha256').update(payloadText).digest('hex');
       await sideChannelMitigations.delayUntilNextBucket(start);
       const elapsedNs = Number(process.hrtime.bigint() - start);
@@ -404,14 +419,17 @@ class AttackSimulationSuite {
     const probes = [probe1, probe2, probe3, probe4];
     const shortProbesSameBucket = (probe1.bucket === probe2.bucket);
     const allQuantizedValid = probes.every(p => p.quantizedMs % 250 === 0 && p.quantizedMs >= 250);
-    const mitigationCertified = shortProbesSameBucket && allQuantizedValid;
+    const quantizedIndistinguishable = shortProbesSameBucket && allQuantizedValid;
+    const mitigationCertified = positiveControlDistinguishable && quantizedIndistinguishable;
 
     return {
       simId: 'ATTACK-SIM-02',
       name: 'Timing Side-Channel Probe vs 250ms Bucketing Mitigation',
       probes,
+      positiveControlDistinguishable,
+      quantizedIndistinguishable,
       mitigationVerdict: mitigationCertified
-        ? 'PASS: Timing variance quantized into uniform 250ms intervals, reducing statistical timing channel bandwidth.'
+        ? 'PASS: Timing variance quantized into uniform 250ms intervals; non-quantized positive control is distinguishable.'
         : 'FAIL: Timing quantization boundary violation',
       mitigationCertified
     };
@@ -419,53 +437,85 @@ class AttackSimulationSuite {
 
   /**
    * Attack Sim 3 (§T.3): KV-cache prefix sharing probe
+   * Uses high-resolution timers, multi-iteration testing, and a positive-control shared cache worker.
    */
   async runAttackSim3_KvCacheProbe() {
     const sharedPrefix = 'SYSTEM_PROMPT_PREFIX_CORPORATE_SAFETY_GUIDELINE_V1:';
-    const repetitions = 5;
-    let totalDurationA = 0;
-    let totalDurationB = 0;
+    const repetitions = 25;
+    let totalIsolatedNsA = 0;
+    let totalIsolatedNsB = 0;
 
+    // Phase 1: Isolated workers under test (each has independent, fresh cold cache)
     for (let i = 0; i < repetitions; i++) {
-      // Step A: Session 1 submits prefix to worker 1
       const workerA = new DedicatedInferenceWorker(`worker-sim3-A-${i}`);
       workerA.create(`session-sim3-A-${i}`);
       workerA.initialize();
       const startA = process.hrtime.bigint();
       workerA.infer(`${sharedPrefix} query from session A repetition ${i}`);
-      const durationANs = Number(process.hrtime.bigint() - startA);
-      totalDurationA += durationANs / 1000000;
+      totalIsolatedNsA += Number(process.hrtime.bigint() - startA);
       workerA.destroy();
 
-      // Step B: Session 2 submits identical prefix to fresh worker 2
       const workerB = new DedicatedInferenceWorker(`worker-sim3-B-${i}`);
       workerB.create(`session-sim3-B-${i}`);
       workerB.initialize();
       const startB = process.hrtime.bigint();
       workerB.infer(`${sharedPrefix} probe from session B repetition ${i}`);
-      const durationBNs = Number(process.hrtime.bigint() - startB);
-      totalDurationB += durationBNs / 1000000;
+      totalIsolatedNsB += Number(process.hrtime.bigint() - startB);
       workerB.destroy();
     }
 
-    const avgDurationA = totalDurationA / repetitions;
-    const avgDurationB = totalDurationB / repetitions;
+    const avgDurationANs = totalIsolatedNsA / repetitions;
+    const avgDurationBNs = totalIsolatedNsB / repetitions;
+    const avgDurationAMs = avgDurationANs / 1e6;
+    const avgDurationBMs = avgDurationBNs / 1e6;
+    const isolatedCacheHitSpeedupObserved = avgDurationBNs < (avgDurationANs * 0.5);
 
-    // A cache hit speedup would cause Session B to execute significantly faster (e.g. < 40% of duration A)
-    // Since separate workers have clean, cold KV-caches, Session B executes with cold cache
-    const cacheHitSpeedupObserved = avgDurationB < (avgDurationA * 0.4) && avgDurationA > 1;
-    const timingDifferenceMs = Math.abs(avgDurationA - avgDurationB);
-    const mitigationCertified = !cacheHitSpeedupObserved;
+    // Phase 2: Positive Control (deliberately shared KV-cache worker to prove probe catches leakage)
+    const sharedCacheMap = new Map();
+    let totalSharedNs1 = 0;
+    let totalSharedNs2 = 0;
+
+    for (let i = 0; i < repetitions; i++) {
+      const probePrompt = `${sharedPrefix} unique prompt repetition ${i}`;
+      const sharedWorker1 = new DedicatedInferenceWorker(`worker-sim3-shared1-${i}`, null, {
+        isSharedCache: true,
+        sharedCacheRef: sharedCacheMap
+      });
+      sharedWorker1.create(`session-sim3-shared1-${i}`);
+      sharedWorker1.initialize();
+      const start1 = process.hrtime.bigint();
+      sharedWorker1.infer(probePrompt);
+      totalSharedNs1 += Number(process.hrtime.bigint() - start1);
+
+      const sharedWorker2 = new DedicatedInferenceWorker(`worker-sim3-shared2-${i}`, null, {
+        isSharedCache: true,
+        sharedCacheRef: sharedCacheMap
+      });
+      sharedWorker2.create(`session-sim3-shared2-${i}`);
+      sharedWorker2.initialize();
+      const start2 = process.hrtime.bigint();
+      sharedWorker2.infer(probePrompt);
+      totalSharedNs2 += Number(process.hrtime.bigint() - start2);
+    }
+
+    const avgSharedNs1 = totalSharedNs1 / repetitions;
+    const avgSharedNs2 = totalSharedNs2 / repetitions;
+    const positiveControlCaught = avgSharedNs2 < (avgSharedNs1 * 0.6);
+    const timingDifferenceMs = Math.abs(avgDurationAMs - avgDurationBMs);
+    const mitigationCertified = !isolatedCacheHitSpeedupObserved && positiveControlCaught;
 
     return {
       simId: 'ATTACK-SIM-03',
-      name: 'KV-Cache / Prefix Cache Leakage Probe',
+      name: 'KV-Cache / Prefix Cache Leakage Probe with Positive Control',
       repetitions,
-      sessionAAvgDurationMs: Number(avgDurationA.toFixed(3)),
-      sessionBAvgDurationMs: Number(avgDurationB.toFixed(3)),
+      sessionAAvgDurationMs: Number(avgDurationAMs.toFixed(3)),
+      sessionBAvgDurationMs: Number(avgDurationBMs.toFixed(3)),
       timingDifferenceMs: Number(timingDifferenceMs.toFixed(3)),
-      cacheHitSpeedupObserved,
-      explanation: 'Dedicated per-session worker and cold-cache lifecycle prevents cross-tenant prefix-cache timing attacks.',
+      cacheHitSpeedupObserved: isolatedCacheHitSpeedupObserved,
+      positiveControlCaught,
+      positiveControlColdAvgMs: Number((avgSharedNs1 / 1e6).toFixed(3)),
+      positiveControlHitAvgMs: Number((avgSharedNs2 / 1e6).toFixed(3)),
+      explanation: 'Dedicated per-session worker and cold-cache lifecycle prevents cross-tenant prefix-cache timing attacks. Positive control verified that shared caches are detected.',
       mitigationCertified
     };
   }
@@ -498,7 +548,7 @@ class AttackSimulationSuite {
   async runAttackSim5_AuditTamper() {
     const localAudit = new WormAuditStore();
     for (let i = 0; i < 6; i++) {
-      localAudit.append({ sessionId: `sess-${i}`, tenant: 'red', eventType: `EVENT_${i}`, payload: { data: i } });
+      localAudit.append({ sessionId: `sess-${i}`, tenant: 'red', eventType: 'ATTACK_PAYLOAD_SUBMITTED', payload: { data: i } });
     }
 
     const preRoot = localAudit.getMerkleRoot();

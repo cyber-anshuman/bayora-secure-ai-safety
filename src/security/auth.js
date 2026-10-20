@@ -13,7 +13,35 @@ const REQUIRED_KEY_VARS = [
   'ADMIN_API_KEY'
 ];
 
+const KNOWN_EXAMPLE_VALUES = new Set([
+  'bayora_production_vault_secret_min_32_characters_long',
+  'bayora_production_worm_secret_min_32_characters_long',
+  'red_dev_key_example_secret_1234567890',
+  'blue_dev_key_example_secret_1234567890',
+  'auditor_dev_key_example_secret_1234567890',
+  'admin_dev_key_example_secret_1234567890'
+]);
+
 let devKeysPrinted = false;
+
+function validateProductionSecrets(env = process.env) {
+  const nodeEnv = env.NODE_ENV || 'development';
+  if (nodeEnv === 'production') {
+    const secretsToCheck = [
+      { name: 'VAULT_SECRET', val: env.VAULT_SECRET },
+      { name: 'WORM_ANCHOR_SECRET', val: env.WORM_ANCHOR_SECRET || env.BAYORA_ANCHOR_SECRET },
+      { name: 'RED_API_KEY', val: env.RED_API_KEY },
+      { name: 'BLUE_API_KEY', val: env.BLUE_API_KEY },
+      { name: 'AUDITOR_API_KEY', val: env.AUDITOR_API_KEY },
+      { name: 'ADMIN_API_KEY', val: env.ADMIN_API_KEY }
+    ];
+    for (const { name, val } of secretsToCheck) {
+      if (val && KNOWN_EXAMPLE_VALUES.has(val)) {
+        throw new Error(`Refusing to start in production: Insecure known-example secret detected for ${name}. Generate a production secret using 'openssl rand -hex 32'.`);
+      }
+    }
+  }
+}
 
 function ensureApiKeys() {
   const nodeEnv = process.env.NODE_ENV || 'development';
@@ -40,6 +68,8 @@ function ensureApiKeys() {
       console.log('========================================');
     }
   }
+
+  validateProductionSecrets();
 }
 
 // Initialize on module load
@@ -138,5 +168,7 @@ module.exports = {
   authenticate,
   requireAuth,
   requireRole,
-  demoEndpointGate
+  demoEndpointGate,
+  validateProductionSecrets,
+  KNOWN_EXAMPLE_VALUES
 };

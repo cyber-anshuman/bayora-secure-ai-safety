@@ -3,17 +3,25 @@
  * Section K: LLM Isolation & Contamination Analysis
  * Lifecycle: CREATE -> INITIALIZE -> TEST -> VERIFY -> DESTROY
  * Guarantees zero cross-session KV-cache contamination, pinned weight hashes, and automated canary probes.
+ *
+ * NOTE ON CANARY PROBE LIMITATION:
+ * The automated canary probe in this implementation specifically detects the test-only
+ * simulateContamination flag used by test harnesses. It is a deterministic demonstration
+ * harness and does NOT provide general or out-of-band weight/memory contamination detection
+ * without hardware/enclave attestation.
  */
 
 const crypto = require('crypto');
 
 class DedicatedInferenceWorker {
-  constructor(workerId = `worker_${crypto.randomBytes(4).toString('hex')}`, loadedWeightsId = null) {
+  constructor(workerId = `worker_${crypto.randomBytes(4).toString('hex')}`, loadedWeightsId = null, options = {}) {
     this.workerId = workerId;
     this.status = 'UNINITIALIZED'; // CREATE -> INITIALIZE -> TEST -> VERIFY -> DESTROY
     this.pinnedWeightsHash = process.env.MODEL_WEIGHT_PIN_HASH || 'UNPINNED_DEMO_MODEL';
     this.loadedWeightsId = loadedWeightsId !== null && loadedWeightsId !== undefined ? loadedWeightsId : this.pinnedWeightsHash;
-    this.kvCache = new Map(); // Strictly dedicated to this session
+    this.isSharedCache = Boolean(options && options.isSharedCache);
+    this.sharedCacheRef = options && options.sharedCacheRef ? options.sharedCacheRef : null;
+    this.kvCache = this.isSharedCache && this.sharedCacheRef ? this.sharedCacheRef : new Map(); // Strictly dedicated to this session unless deliberately configured as shared cache positive control
     this.sessionId = null;
     this.isContaminated = false; // Flag to simulate dirty state
     this.canaryPrompt = 'CANARY_PROBE_DETERMINISTIC_MODEL_INTEGRITY_CHECK';
@@ -25,9 +33,17 @@ class DedicatedInferenceWorker {
    * Internal deterministic inference execution engine
    */
   _runInference(prompt) {
-    // Process prompt
+    // Process prompt into KV-cache
     const promptDigest = crypto.createHash('sha256').update(prompt).digest('hex');
-    this.kvCache.set(promptDigest, { processedAt: Date.now() });
+    const isCacheHit = this.kvCache.has(promptDigest);
+    if (!isCacheHit) {
+      // Simulate KV-cache token embedding / projection work for cold cache (measurable via process.hrtime.bigint)
+      let acc = promptDigest;
+      for (let i = 0; i < 300; i++) {
+        acc = crypto.createHash('sha256').update(acc).digest('hex');
+      }
+      this.kvCache.set(promptDigest, { processedAt: Date.now(), acc });
+    }
 
     // Emulate LLM response with deterministic safety logic
     let rawOutput = '';
@@ -79,7 +95,9 @@ class DedicatedInferenceWorker {
   create(sessionId) {
     this.sessionId = sessionId;
     this.status = 'CREATED';
-    this.kvCache.clear();
+    if (!this.isSharedCache) {
+      this.kvCache.clear();
+    }
     this.isContaminated = false;
     return {
       workerId: this.workerId,
@@ -97,6 +115,16 @@ class DedicatedInferenceWorker {
       throw new Error(`Invalid lifecycle transition: cannot INITIALIZE from status ${this.status}`);
     }
 
+    // Check ALLOW_UNPINNED_DEMO policy
+    const isProd = process.env.NODE_ENV === 'production';
+    const allowUnpinned = process.env.ALLOW_UNPINNED_DEMO === 'true' || (!isProd && process.env.ALLOW_UNPINNED_DEMO !== 'false');
+    if (!allowUnpinned && (this.pinnedWeightsHash === 'UNPINNED_DEMO_MODEL' || this.loadedWeightsId === 'UNPINNED_DEMO_MODEL')) {
+      this.status = 'HARNESS_ERROR_CONFIG_DRIFT';
+      const err = new Error('Unpinned demo model weights are forbidden when ALLOW_UNPINNED_DEMO is false. Pinned weights required in production.');
+      err.code = 'HARNESS_ERROR_CONFIG_DRIFT';
+      throw err;
+    }
+
     // Verify pinned weight hash (detects model weight tampering / supply chain drift)
     const currentWeightsHash = this._computeRuntimeWeightsHash();
     if (currentWeightsHash !== this.pinnedWeightsHash) {
@@ -110,15 +138,17 @@ class DedicatedInferenceWorker {
     this.systemPromptHash = crypto.createHash('sha256').update(systemPrompt).digest('hex');
     this.status = 'INITIALIZED';
 
-    // Verify clean cold cache state
-    this.kvCache.clear();
+    // Verify clean cold cache state (unless deliberately shared for positive control testing)
+    if (!this.isSharedCache) {
+      this.kvCache.clear();
+    }
 
     return {
       workerId: this.workerId,
       status: this.status,
       weightsHash: this.pinnedWeightsHash,
       systemPromptHash: this.systemPromptHash,
-      kvCacheCold: true
+      kvCacheCold: !this.isSharedCache
     };
   }
 
@@ -151,6 +181,11 @@ class DedicatedInferenceWorker {
   /**
    * STEP 4: VERIFY - Automated canary probe check
    * Runs fixed canary prompt through infer in fresh state and verifies output hash against baseline
+   *
+   * LIMITATION & HONESTY DISCLOSURE:
+   * The canary probe in this demonstration specifically detects the test-only `simulateContamination`
+   * flag and associated test mock state. It does not provide general or dynamic detection of arbitrary
+   * out-of-band weight or in-memory contamination without hardware/enclave attestation.
    */
   verifyCanary() {
     this.status = 'VERIFYING';

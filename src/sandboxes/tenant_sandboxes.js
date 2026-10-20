@@ -36,7 +36,7 @@ class RedSandbox {
       throw err;
     }
 
-    // 2. Validate session existence
+    // 2. Validate session existence first
     if (this.broker && this.broker.sessions && typeof this.broker.sessions.get === 'function') {
       const session = this.broker.sessions.get(sessionId);
       if (!session) {
@@ -46,12 +46,7 @@ class RedSandbox {
       }
     }
 
-    // 3. Validate schema
-    if (!payloadText || typeof payloadText !== 'string' || payloadText.trim().length === 0) {
-      throw new Error('Schema Error: Red payload must be a non-empty string');
-    }
-
-    // 4. Validate capability token BEFORE any audit logging or expensive compute
+    // 3. Validate capability token BEFORE phase check or expensive compute
     if (this.vault && typeof this.vault.validateCapability === 'function') {
       const capCheck = this.vault.validateCapability(token, 'submit_attack', sessionId, 'red');
       if (!capCheck.valid) {
@@ -61,7 +56,25 @@ class RedSandbox {
       }
     }
 
-    // 4. Compute digest via isolated V8 worker thread
+    // 4. Validate phase
+    if (this.broker && this.broker.sessions && typeof this.broker.sessions.get === 'function') {
+      const session = this.broker.sessions.get(sessionId);
+      if (session && session.phase !== 'RED_TURN') {
+        const err = new Error(`State Machine Error: Cannot process RED_TURN while in phase '${session.phase}'`);
+        err.code = 'E_STATE_MACHINE_ERROR';
+        throw err;
+      }
+    }
+
+    // 5. Validate schema
+    if (!payloadText || typeof payloadText !== 'string' || payloadText.trim().length === 0) {
+      throw new Error('Schema Error: Red payload must be a non-empty string');
+    }
+
+    // 5. Submit to broker: atomic capability consumption and state transition
+    const turnResult = await this.broker.processRedTurn(sessionId, payloadText, token);
+
+    // 6. Compute digest and append to WORM audit store only after broker accepts the turn
     const workerResult = await runInIsolatedWorker(
       'red',
       { type: 'DIGEST', payloadText },
@@ -69,7 +82,6 @@ class RedSandbox {
     );
     const digest = workerResult.digest;
 
-    // 5. Append evidence to WORM audit log (Write-Only) - only AFTER capability check succeeds
     this.audit.append({
       sessionId,
       tenant: 'red',
@@ -79,8 +91,7 @@ class RedSandbox {
       details: { sizeBytes: Buffer.byteLength(payloadText, 'utf8') }
     }, 'red');
 
-    // 6. Send to broker
-    return await this.broker.processRedTurn(sessionId, payloadText, token);
+    return turnResult;
   }
 
   /**
@@ -153,7 +164,7 @@ class BlueSandbox {
       throw err;
     }
 
-    // Validate session existence
+    // 2. Validate session existence first
     if (this.broker && this.broker.sessions && typeof this.broker.sessions.get === 'function') {
       const session = this.broker.sessions.get(sessionId);
       if (!session) {
@@ -163,12 +174,22 @@ class BlueSandbox {
       }
     }
 
-    // 1. Validate capability token BEFORE any audit logging or expensive compute
+    // 3. Validate capability token BEFORE phase check or expensive compute
     if (this.vault && typeof this.vault.validateCapability === 'function') {
       const capCheck = this.vault.validateCapability(token, 'submit_defense', sessionId, 'blue');
       if (!capCheck.valid) {
         const err = new Error(`Vault Deny: ${capCheck.reason}`);
         err.code = 'E_AUTH_FAILED';
+        throw err;
+      }
+    }
+
+    // 4. Validate phase
+    if (this.broker && this.broker.sessions && typeof this.broker.sessions.get === 'function') {
+      const session = this.broker.sessions.get(sessionId);
+      if (session && session.phase !== 'BLUE_TURN') {
+        const err = new Error(`State Machine Error: Cannot process BLUE_TURN while in phase '${session.phase}'`);
+        err.code = 'E_STATE_MACHINE_ERROR';
         throw err;
       }
     }
@@ -204,7 +225,10 @@ class BlueSandbox {
       timestamp: new Date().toISOString()
     };
 
-    // Log to WORM audit store (Write-Only) - only AFTER capability check succeeds
+    // Broker processes blue turn: atomic capability consumption and state transition
+    const turnResult = await this.broker.processBlueTurn(sessionId, evaluationResult, token);
+
+    // Log to WORM audit store (Write-Only) only after successful turn processing
     this.audit.append({
       sessionId,
       tenant: 'blue',
@@ -214,7 +238,7 @@ class BlueSandbox {
       details: { classifierVersion: 'blue-guard-v2.1' }
     }, 'blue');
 
-    return await this.broker.processBlueTurn(sessionId, evaluationResult, token);
+    return turnResult;
   }
 
   /**

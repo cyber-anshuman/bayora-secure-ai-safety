@@ -319,21 +319,60 @@ npm run test:coverage
 | Endpoint | Method | Role | Description |
 |---|:---:|:---:|---|
 | `/api/status` | `GET` | Public | System health, CNI policy status, Merkle root, and node anti-affinity bindings. |
-| `/api/sessions` | `POST` | Broker | Initialize a new session (`SETUP` phase); issues scoped capability tokens. |
-| `/api/sessions/:id/red-turn` | `POST` | Red | Submit attack payload prompt (`RED_TURN ➔ INFERENCE ➔ EVAL`). |
-| `/api/sessions/:id/blue-turn` | `POST` | Blue | Submit defensive evaluation verdict (`BLUE_TURN ➔ CONCLUDE`). |
-| `/api/sessions/:id/disclosure`| `GET` | Blue | Retrieve post-conclude disclosure bundle under policy (`DISCLOSURE`). |
-| `/api/audit` | `GET` | Auditor | Query WORM audit records (tenants receive `E_AUDIT_WRITE_ONLY`). |
-| `/api/audit/integrity` | `GET` | Auditor | Verify cryptographic SHA-256 hash chain and Merkle root integrity. |
-| `/api/audit/tamper` | `POST` | Auditor | Injects synthetic modification to demonstrate tamper detection. |
+| `/api/sessions` | `POST` | Admin, Broker | Initialize a new session (`SETUP` phase); returns `{ sessionId }`. |
+| `/api/sessions/:id/token` | `POST` | Red, Blue, Admin | Mint an ephemeral capability token scoped to the authenticated caller role. |
+| `/api/sessions/:id/red-turn` | `POST` | Red, Admin | Submit attack payload prompt (`RED_TURN ➔ MODEL_INFERENCE`). |
+| `/api/sessions/:id/model-output` | `GET` | Blue, Admin | Retrieve model output for evaluation (`BLUE_TURN`). |
+| `/api/sessions/:id/blue-turn` | `POST` | Blue, Admin | Submit defensive evaluation verdict (`BLUE_TURN ➔ CONCLUDE`). |
+| `/api/sessions/:id/coarse-status` | `GET` | Red, Admin | Retrieve high-level outcome without leaking defense details (requires capability token). |
+| `/api/sessions/:id/disclosure` | `GET` | Blue, Admin | Retrieve post-conclude disclosure bundle under policy (requires capability token). |
+| `/api/sessions/:id/red-payload-query` | `GET` | Blue, Admin | Query raw red payload post-conclusion (requires capability token). |
+| `/api/audit` | `GET` | Auditor, Admin | Query WORM audit records with pagination (`limit`, `offset`; `?role=` parameter removed). |
+| `/api/audit/integrity` | `GET` | Auditor, Admin | Verify cryptographic SHA-256 hash chain and Merkle root integrity. |
+| `/api/audit/tamper` | `POST` | Admin | Injects synthetic modification to demonstrate tamper detection (demo endpoint). |
+| `/api/platform/reset` | `POST` | Admin | Resets platform state and clears active sessions (demo endpoint). |
 | `/api/datasets` | `GET` | Public | Retrieve all 8 benchmark datasets and snapshot hashes. |
+| `/api/datasets/samples` | `GET` | Public | Retrieve standardized prompt samples across benchmarks. |
 | `/api/datasets/:id` | `GET` | Public | Inspect samples and metadata for a specific benchmark suite. |
-| `/api/attack-sims` | `GET` | Public | Execute all 7 Section T adversarial attack simulations. |
-| `/api/poc-tests` | `GET` | Public | Execute all 9 Section S PoC demonstration tests. |
+| `/api/attack-sims` | `GET` | Admin | Execute all 7 Section T adversarial attack simulations (demo endpoint). |
+| `/api/attack-sims/:id/run` | `POST` | Admin | Execute a specific attack simulation scenario (demo endpoint). |
+| `/api/poc-tests` | `GET` | Admin | Execute all 9 Section S PoC demonstration tests (demo endpoint). |
+| `/api/metrics/:tenant` | `GET` | Public, Tenant | Retrieve isolated per-tenant bucketed telemetry. |
 
 ---
 
 ## 🚀 Quickstart: Local & Docker Deployment
+
+### 🎮 Running the Demo
+
+Follow these exact steps to run the interactive dashboard and test suite locally:
+
+1. **Copy the environment configuration**:
+   ```bash
+   cp .env.example .env
+   ```
+2. **Set your API keys and production secrets in `.env`**:
+   ```bash
+   ADMIN_API_KEY=admin_demo_secret_key_12345
+   RED_API_KEY=red_demo_secret_key_12345
+   BLUE_API_KEY=blue_demo_secret_key_12345
+   AUDITOR_API_KEY=auditor_demo_secret_key_12345
+   VAULT_SECRET=$(openssl rand -hex 32)
+   WORM_ANCHOR_SECRET=$(openssl rand -hex 32)
+   ```
+3. **Enable demo attack lab and PoC testing endpoints**:
+   In `.env`, set:
+   ```bash
+   ENABLE_DEMO_ENDPOINTS=true
+   ```
+4. **Start the Bayora server**:
+   ```bash
+   npm start
+   ```
+5. **Open the Operations Dashboard**:
+   Navigate to [http://localhost:3000](http://localhost:3000) in your browser.
+6. **Enter API keys into the UI**:
+   In the top-right "API Keys" panel, enter your configured `Admin Key`, `Red Key`, `Blue Key`, and `Auditor Key`. Keys remain stored strictly in browser memory (never persisted to `localStorage`). You can now execute the full automated session lifecycle, trigger attack simulations, inspect WORM audit logs, and test tamper detection!
 
 ### Local Development
 ```bash
@@ -383,7 +422,7 @@ curl http://localhost:3000/api/status
 
 1. **No Real Hypervisor Enforcement**: In this reference implementation, tenant sandboxes execute inside Node.js `worker_threads` with V8 isolate memory limits (`resourceLimits`). Physical Kata Containers microVM isolation is modeled in configuration metadata rather than enforced by a hypervisor.
 2. **No Real Kernel eBPF Enforcement**: Network filtering is evaluated centrally in application logic via `OpaPolicyEngine` rather than kernel-enforced Cilium eBPF network interfaces.
-3. **Scripted Inference Stub**: The inference engine (`DedicatedInferenceWorker`) is a deterministic scripted demonstration stand-in for reproducible evaluation, not an external production GPU LLM server (e.g. vLLM or TGI).
+3. **Scripted Inference Stub & Canary Limitation**: The inference engine (`DedicatedInferenceWorker`) is a deterministic scripted demonstration stand-in for reproducible evaluation, not an external production GPU LLM server (e.g. vLLM or TGI). The automated canary probe in this implementation specifically detects the test-only `simulateContamination` flag and mock state; it does not provide general or dynamic detection of arbitrary out-of-band weight or in-memory contamination without hardware/enclave attestation.
 4. **Anchor Trust Boundaries**: External Merkle root audit anchors are HMAC-signed; their non-repudiation and immutability are only as trustworthy as the external storage and signing keys where they are published.
 
 ---

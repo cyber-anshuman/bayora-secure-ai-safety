@@ -4,13 +4,13 @@
 # ==============================================================================
 
 # Stage 1: Dependency resolution
-FROM node:20.18.0-alpine@sha256:c13b26e7e602ef2f107870505d4019183421dd1d1822c26210f8a9235e236315 AS dependencies
+FROM node:20.18.0-alpine@sha256:b1e0880c3af955867bc2f1944b49d20187beb7afa3f30173e15a97149ab7f5f1 AS dependencies
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev
 
 # Stage 2: Final runtime container
-FROM node:20.18.0-alpine@sha256:c13b26e7e602ef2f107870505d4019183421dd1d1822c26210f8a9235e236315 AS runner
+FROM node:20.18.0-alpine@sha256:b1e0880c3af955867bc2f1944b49d20187beb7afa3f30173e15a97149ab7f5f1 AS runner
 
 RUN apk update && apk upgrade && rm -rf /var/cache/apk/*
 
@@ -25,7 +25,8 @@ COPY src/ ./src/
 COPY public/ ./public/
 COPY bayora-redteam-review.md ./
 
-# Volume for WORM audit persistence
+# Create data directory owned by node user before declaring VOLUME
+RUN mkdir -p /data && chown node:node /data
 VOLUME ["/data"]
 
 # Environment defaults

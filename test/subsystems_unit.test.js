@@ -353,6 +353,8 @@ async function runSubsystemsUnitTests() {
   // 4. EvaluationIntegrityEngine Branch Tests
   // =========================================================================
   const integrityEngine = new EvaluationIntegrityEngine();
+  // Pin expectedModelHash to test genuine CERTIFIED_SAFETY_FINDING path
+  integrityEngine.expectedModelHash = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
   const goodEvidence = {
     canaryResult: { passed: true },
     modelHash: integrityEngine.expectedModelHash,
@@ -360,13 +362,41 @@ async function runSubsystemsUnitTests() {
     datasetHash: integrityEngine.expectedDatasetHash,
     infraErrors: [],
     retries: 0,
-    resourceConsumption: { cpuPeak: 45, memoryPeak: 60 },
+    resourceConsumption: { cpuPeak: 45, memoryPeak: 60, simulated: false },
     auditReconstructable: true
   };
 
   const goodVerdict = integrityEngine.evaluateFinding(goodEvidence);
   assert.strictEqual(goodVerdict.verdict, 'CERTIFIED_SAFETY_FINDING');
   assert.strictEqual(goodVerdict.certified, true);
+
+  // Unpinned demo model caps at UNVERIFIED (§L)
+  const unpinnedEngine = new EvaluationIntegrityEngine();
+  const unpinnedVerdict = unpinnedEngine.evaluateFinding({
+    ...goodEvidence,
+    modelHash: 'UNPINNED_DEMO_MODEL'
+  });
+  assert.strictEqual(unpinnedVerdict.verdict, 'UNVERIFIED');
+  assert.strictEqual(unpinnedVerdict.certified, false);
+  assert.strictEqual(unpinnedVerdict.downgradeReason, 'weights not pinned (demo model)');
+
+  // Unknown dataset downgrades to UNVERIFIED
+  const unknownDsVerdict = integrityEngine.evaluateFinding({
+    ...goodEvidence,
+    datasetHash: 'unknown'
+  });
+  assert.strictEqual(unknownDsVerdict.verdict, 'UNVERIFIED');
+  assert.strictEqual(unknownDsVerdict.certified, false);
+  assert.strictEqual(unknownDsVerdict.downgradeReason, 'dataset source is unknown or unverified');
+
+  // Simulated resource metrics exclude factor 4 and downgrade to UNVERIFIED
+  const simResourceVerdict = integrityEngine.evaluateFinding({
+    ...goodEvidence,
+    resourceConsumption: { cpuPeak: 45, memoryPeak: 60, simulated: true }
+  });
+  assert.strictEqual(simResourceVerdict.verdict, 'UNVERIFIED');
+  assert.strictEqual(simResourceVerdict.checklist.factor4_quotaNormal, false);
+  assert.strictEqual(simResourceVerdict.downgradeReason, 'Resource consumption is simulated; factor 4 excluded from certification.');
 
   const canaryFailVerdict = integrityEngine.evaluateFinding({ ...goodEvidence, canaryResult: { passed: false } });
   assert.strictEqual(canaryFailVerdict.verdict, 'HARNESS_ERROR_CONTAMINATED_MODEL');
@@ -378,7 +408,7 @@ async function runSubsystemsUnitTests() {
   const infraFailVerdict = integrityEngine.evaluateFinding({ ...goodEvidence, infraErrors: ['ETIMEDOUT'], retries: 1 });
   assert.strictEqual(infraFailVerdict.verdict, 'INFRA_FAILURE');
 
-  const quotaVerdict = integrityEngine.evaluateFinding({ ...goodEvidence, resourceConsumption: { cpuPeak: 95, memoryPeak: 91 } });
+  const quotaVerdict = integrityEngine.evaluateFinding({ ...goodEvidence, resourceConsumption: { cpuPeak: 95, memoryPeak: 91, simulated: false } });
   assert.strictEqual(quotaVerdict.verdict, 'ATTACKER_INDUCED_RESOURCE_ANOMALY');
 
   const unverifiedVerdict = integrityEngine.evaluateFinding({ ...goodEvidence, auditReconstructable: false });
@@ -394,12 +424,12 @@ async function runSubsystemsUnitTests() {
   assert.throws(() => worm.query('red'), /E_AUDIT_WRITE_ONLY/);
   assert.throws(() => worm.query('blue'), /E_AUDIT_WRITE_ONLY/);
 
-  worm.append({ sessionId: 'sess_q1', tenant: 'SYSTEM', eventType: 'TEST_EVENT', payload: 'data1' });
+  worm.append({ sessionId: 'sess_q1', tenant: 'SYSTEM', eventType: 'STATE_TRANSITION', payload: 'data1' });
   const systemResults = worm.query('broker', { tenant: 'SYSTEM' });
   assert(Array.isArray(systemResults));
   assert(systemResults.every(e => e.tenant === 'SYSTEM'));
 
-  const sessionResults = worm.query('broker', { sessionId: 'sess_q1', eventType: 'TEST_EVENT' });
+  const sessionResults = worm.query('broker', { sessionId: 'sess_q1', eventType: 'STATE_TRANSITION' });
   assert(Array.isArray(sessionResults));
 
   const storedRoot = worm.getMerkleRoot(true);
@@ -410,8 +440,8 @@ async function runSubsystemsUnitTests() {
 
   // Tamper Merkle divergence detection
   const tamperWorm = new WormAuditStore();
-  tamperWorm.append({ sessionId: 's1', tenant: 'SYSTEM', eventType: 'EV_A', payload: 'a' });
-  tamperWorm.append({ sessionId: 's2', tenant: 'SYSTEM', eventType: 'EV_B', payload: 'b' });
+  tamperWorm.append({ sessionId: 's1', tenant: 'SYSTEM', eventType: 'STATE_TRANSITION', payload: 'a' });
+  tamperWorm.append({ sessionId: 's2', tenant: 'SYSTEM', eventType: 'CONCLUDE', payload: 'b' });
   if (tamperWorm.anchors.length > 0) {
     const lastAnchor = tamperWorm.anchors[tamperWorm.anchors.length - 1];
     lastAnchor.merkleRoot = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
@@ -420,10 +450,19 @@ async function runSubsystemsUnitTests() {
     assert.strictEqual(tamperReport.isValid, false);
   }
 
+  // verifyIntegrityAsync chunked check
+  const wAsync = new WormAuditStore();
+  for (let k = 0; k < 15; k++) {
+    wAsync.append({ sessionId: `s_async_${k}`, tenant: 'SYSTEM', eventType: 'STATE_TRANSITION', payload: `item_${k}` });
+  }
+  const asyncReport = await wAsync.verifyIntegrityAsync(5);
+  assert.strictEqual(asyncReport.isValid, true);
+  assert.strictEqual(asyncReport.totalEntries, 16);
+
   // Task 5 Regression Tests:
   // Check 1: Tampering with genesis block (index 0) is detected
   const wGen = new WormAuditStore();
-  wGen.append({ sessionId: 's1', tenant: 'SYSTEM', eventType: 'TEST_EVENT', payload: 'p1' });
+  wGen.append({ sessionId: 's1', tenant: 'SYSTEM', eventType: 'STATE_TRANSITION', payload: 'p1' });
   wGen.chain[0].details.architecture = 'CORRUPTED_ARCHITECTURE';
   const repGen = wGen.verifyIntegrity();
   assert.strictEqual(repGen.isValid, false, 'Tampering with genesis block must be detected');
@@ -431,15 +470,15 @@ async function runSubsystemsUnitTests() {
 
   // Check 2: Tampering with sessionId is detected by canonical hash computation
   const wSess = new WormAuditStore();
-  const eSess = wSess.append({ sessionId: 'sess_original', tenant: 'SYSTEM', eventType: 'TEST_EVENT', payload: 'p2' });
+  const eSess = wSess.append({ sessionId: 'sess_original', tenant: 'SYSTEM', eventType: 'STATE_TRANSITION', payload: 'p2' });
   eSess.sessionId = 'sess_forged';
   const repSess = wSess.verifyIntegrity();
   assert.strictEqual(repSess.isValid, false, 'Tampering with sessionId must be detected');
 
   // Check 3: Truncating the tail of the chain is detected
   const wTrunc = new WormAuditStore();
-  wTrunc.append({ sessionId: 's1', tenant: 'SYSTEM', eventType: 'TEST_EVENT', payload: 'p1' });
-  wTrunc.append({ sessionId: 's2', tenant: 'SYSTEM', eventType: 'TEST_EVENT', payload: 'p2' });
+  wTrunc.append({ sessionId: 's1', tenant: 'SYSTEM', eventType: 'STATE_TRANSITION', payload: 'p1' });
+  wTrunc.append({ sessionId: 's2', tenant: 'SYSTEM', eventType: 'CONCLUDE', payload: 'p2' });
   assert.ok(wTrunc.anchors.length > 0);
   assert.strictEqual(wTrunc.anchors[wTrunc.anchors.length - 1].blockCount, 3);
   wTrunc.chain.pop(); // Remove tail
@@ -449,9 +488,9 @@ async function runSubsystemsUnitTests() {
 
   // Check 4: Rewriting and re-hashing mid-chain entry is detected by anchored Merkle root
   const wMid = new WormAuditStore();
-  wMid.append({ sessionId: 's1', tenant: 'SYSTEM', eventType: 'TEST_EVENT', payload: 'p1' });
-  wMid.append({ sessionId: 's2', tenant: 'SYSTEM', eventType: 'TEST_EVENT', payload: 'p2' });
-  wMid.append({ sessionId: 's3', tenant: 'SYSTEM', eventType: 'TEST_EVENT', payload: 'p3' });
+  wMid.append({ sessionId: 's1', tenant: 'SYSTEM', eventType: 'STATE_TRANSITION', payload: 'p1' });
+  wMid.append({ sessionId: 's2', tenant: 'SYSTEM', eventType: 'ATTACK_PAYLOAD_SUBMITTED', payload: 'p2' });
+  wMid.append({ sessionId: 's3', tenant: 'SYSTEM', eventType: 'CONCLUDE', payload: 'p3' });
   // Tamper block 1 and re-hash downstream chain to simulate full re-hash attempt
   wMid.chain[1].payloadHash = '0000000000000000000000000000000000000000000000000000000000000001';
   wMid.chain[1].entryHash = wMid._calculateEntryHash(wMid.chain[1]);
@@ -474,18 +513,18 @@ async function runSubsystemsUnitTests() {
   assert.strictEqual(wDegraded.degraded, true);
   assert.ok(wDegraded.degradedReason);
   assert.throws(() => {
-    wDegraded.append({ sessionId: 's1', tenant: 'SYSTEM', eventType: 'TEST_EVENT', payload: 'p1' });
+    wDegraded.append({ sessionId: 's1', tenant: 'SYSTEM', eventType: 'STATE_TRANSITION', payload: 'p1' });
   }, /WORM_STORAGE_ERROR/);
   try { fs.unlinkSync(conflictFile); } catch (e) {}
 
   // Check 6: File reload continues chain without duplicate genesis
   const tempAuditFile = path.join(os.tmpdir(), 'bayora_persist_test_' + Date.now() + '.log');
   const wPersist1 = new WormAuditStore(null, tempAuditFile);
-  wPersist1.append({ sessionId: 's1', tenant: 'SYSTEM', eventType: 'TEST_EVENT', payload: 'p1' });
+  wPersist1.append({ sessionId: 's1', tenant: 'SYSTEM', eventType: 'STATE_TRANSITION', payload: 'p1' });
   assert.strictEqual(wPersist1.chain.length, 2);
   const wPersist2 = new WormAuditStore(wPersist1.anchorSecret, tempAuditFile);
   assert.strictEqual(wPersist2.chain.length, 2, 'Must reload existing chain without duplicate genesis');
-  wPersist2.append({ sessionId: 's2', tenant: 'SYSTEM', eventType: 'TEST_EVENT', payload: 'p2' });
+  wPersist2.append({ sessionId: 's2', tenant: 'SYSTEM', eventType: 'STATE_TRANSITION', payload: 'p2' });
   assert.strictEqual(wPersist2.chain.length, 3);
   assert.strictEqual(wPersist2.verifyIntegrity().isValid, true);
   try { fs.unlinkSync(tempAuditFile); } catch (e) {}
@@ -493,10 +532,10 @@ async function runSubsystemsUnitTests() {
   // Check 7: Tenant validation and allowlists
   const wSec = new WormAuditStore();
   assert.throws(() => {
-    wSec.append({ sessionId: 's1', tenant: 'SYSTEM', eventType: 'TEST_EVENT', payload: 'bad' }, 'red');
+    wSec.append({ sessionId: 's1', tenant: 'SYSTEM', eventType: 'STATE_TRANSITION', payload: 'bad' }, 'red');
   }, /E_AUDIT_TENANT_MISMATCH/);
   assert.throws(() => {
-    wSec.append({ sessionId: 's1', tenant: 'red', actor: 'SYSTEM_ADMIN', eventType: 'TEST_EVENT', payload: 'bad' }, 'red');
+    wSec.append({ sessionId: 's1', tenant: 'red', actor: 'SYSTEM_ADMIN', eventType: 'ATTACK_PAYLOAD_SUBMITTED', payload: 'bad' }, 'red');
   }, /E_AUDIT_IMPERSONATION/);
   assert.throws(() => {
     wSec.append({ sessionId: 's1', tenant: 'SYSTEM', eventType: 'UNKNOWN_FORGED_EVENT', payload: 'bad' }, 'broker');
@@ -624,7 +663,6 @@ async function runSubsystemsUnitTests() {
   };
 
   const redSandbox = new RedSandbox(stubBroker, stubAudit, stubOpaAllow, stubVault);
-  const blueSandbox = new BlueSandbox(stubBroker, stubAudit, stubOpaAllow, stubVault);
 
   // 10a. Red submitAttack with empty payload → Schema Error
   await assert.rejects(

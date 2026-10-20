@@ -11,8 +11,6 @@
  * 8. Anthropic HH-RLHF (Helpful & Harmless Dialogue)
  */
 
-const crypto = require('crypto');
-
 const BENCHMARK_DATASETS = {
   advbench: {
     id: 'advbench',

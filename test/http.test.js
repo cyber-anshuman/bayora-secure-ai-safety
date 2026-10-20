@@ -356,7 +356,7 @@ describe('Task 3: Information Flow and Disclosure Security Tests', () => {
     assert.strictEqual(data.code, 'E_INVALID_DISCLOSURE_POLICY');
   });
 
-  test('No-token call to red-payload-query and disclosure returns 401', async () => {
+  test('No-token call to red-payload-query and disclosure returns canonical 403', async () => {
     // Create session
     const createRes = await fetch(`${baseUrl}/api/sessions`, {
       method: 'POST',
@@ -372,13 +372,13 @@ describe('Task 3: Information Flow and Disclosure Security Tests', () => {
     const queryNoToken = await fetch(`${baseUrl}/api/sessions/${sessionId}/red-payload-query`, {
       headers: { 'X-API-Key': process.env.BLUE_API_KEY }
     });
-    assert.strictEqual(queryNoToken.status, 401, 'No-token red-payload-query must get 401');
+    assert.strictEqual(queryNoToken.status, 403, 'No-token red-payload-query must get 403');
 
     // Call disclosure without capability token
     const discNoToken = await fetch(`${baseUrl}/api/sessions/${sessionId}/disclosure`, {
       headers: { 'X-API-Key': process.env.BLUE_API_KEY }
     });
-    assert.strictEqual(discNoToken.status, 401, 'No-token disclosure must get 401');
+    assert.strictEqual(discNoToken.status, 403, 'No-token disclosure must get 403');
   });
 
   test('Red-turn response returns ONLY { sessionId, phase: "ACCEPTED" } with no verdict or latency fields', async () => {
@@ -494,9 +494,12 @@ describe('Task 3: Information Flow and Disclosure Security Tests', () => {
     assert.ok(postQueryData.payload.includes('[REDACTED_ATTACK_CATEGORY_JAILBREAK:'), 'Must return redacted string');
     assert.strictEqual(postQueryData.payload.includes(rawAttackPayload), false, 'Must never return raw payload');
 
-    // Post-CONCLUDE red can query coarse status
+    // Post-CONCLUDE red can query coarse status with capability token
     const coarseStatusRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/coarse-status`, {
-      headers: { 'X-API-Key': process.env.RED_API_KEY }
+      headers: {
+        'X-API-Key': process.env.RED_API_KEY,
+        'Authorization': `Bearer ${JSON.stringify(redToken)}`
+      }
     });
     assert.strictEqual(coarseStatusRes.status, 200);
     const coarseData = await coarseStatusRes.json();
@@ -596,6 +599,24 @@ describe('Task 4: Errors, State Machine Privacy and Side-Channel Mitigations', (
       headers: { 'X-API-Key': process.env.RED_API_KEY }
     });
     const { token: tok2 } = await tok2Res.json();
+
+    // Warm-up call so JIT compilation and worker pool do not skew timing under coverage
+    const sWarmRes = await fetch(`${baseUrl}/api/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.ADMIN_API_KEY },
+      body: JSON.stringify({ disclosurePolicy: 'REDACTED_DEFENSE' })
+    });
+    const { sessionId: sessWarm } = await sWarmRes.json();
+    const tokWarmRes = await fetch(`${baseUrl}/api/sessions/${sessWarm}/token`, {
+      method: 'POST',
+      headers: { 'X-API-Key': process.env.RED_API_KEY }
+    });
+    const { token: tokWarm } = await tokWarmRes.json();
+    await fetch(`${baseUrl}/api/sessions/${sessWarm}/red-turn`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.RED_API_KEY },
+      body: JSON.stringify({ payloadText: 'warmup', token: tokWarm })
+    });
 
     // Short payload (10 chars)
     const startShort = Date.now();
@@ -842,8 +863,59 @@ describe('Task 8: Honest Integrity Engine and Simulation Tests', () => {
     });
 
     assert.strictEqual(verdict.weightsPinned, false, 'Demo placeholder must report weightsPinned: false');
-    assert.strictEqual(verdict.verdict, 'CERTIFIED_SAFETY_FINDING');
+    assert.strictEqual(verdict.verdict, 'UNVERIFIED');
+    assert.strictEqual(verdict.certified, false);
+    assert.strictEqual(verdict.downgradeReason, 'weights not pinned (demo model)');
     assert.strictEqual(verdict.resourceMetrics.simulated, false);
+  });
+
+  test('EvaluationIntegrityEngine certifies safety finding when weights are pinned', () => {
+    const engine = new EvaluationIntegrityEngine();
+    const pinnedHash = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+    engine.expectedModelHash = pinnedHash;
+    const verdict = engine.evaluateFinding({
+      canaryResult: { passed: true },
+      modelHash: pinnedHash,
+      configHash: engine.expectedConfigHash,
+      datasetHash: engine.expectedDatasetHash,
+      infraErrors: [],
+      retries: 0,
+      resourceConsumption: { cpuPeak: 20, memoryPeak: 30, simulated: false },
+      auditReconstructable: true
+    });
+
+    assert.strictEqual(verdict.weightsPinned, true);
+    assert.strictEqual(verdict.verdict, 'CERTIFIED_SAFETY_FINDING');
+    assert.strictEqual(verdict.certified, true);
+  });
+
+  test('ALLOW_UNPINNED_DEMO policy refuses unpinned demo model when disabled', () => {
+    const origEnv = process.env.ALLOW_UNPINNED_DEMO;
+    const origNodeEnv = process.env.NODE_ENV;
+    try {
+      process.env.ALLOW_UNPINNED_DEMO = 'false';
+      process.env.NODE_ENV = 'production';
+      const worker = new DedicatedInferenceWorker('worker-unpinned-rejection');
+      worker.create('sess-unpinned-rej');
+      assert.throws(() => worker.initialize(), /Unpinned demo model weights are forbidden/);
+    } finally {
+      process.env.ALLOW_UNPINNED_DEMO = origEnv || '';
+      process.env.NODE_ENV = origNodeEnv || 'test';
+    }
+  });
+
+  test('Sim 2 and Sim 3 positive controls catch timing leakage and shared cache', async () => {
+    const AttackSimulationSuite = require('../src/attacks/simulation_suite');
+    const simSuite = new AttackSimulationSuite();
+    const sim2 = await simSuite.runAttackSim2_TimingSideChannel();
+    assert.strictEqual(sim2.positiveControlDistinguishable, true, 'Non-quantized probe must be distinguishable');
+    assert.strictEqual(sim2.quantizedIndistinguishable, true, 'Quantized probe must be indistinguishable');
+    assert.strictEqual(sim2.mitigationCertified, true);
+
+    const sim3 = await simSuite.runAttackSim3_KvCacheProbe();
+    assert.strictEqual(sim3.positiveControlCaught, true, 'Positive control shared cache must be detected');
+    assert.strictEqual(sim3.cacheHitSpeedupObserved, false, 'Isolated workers must have no cache hit speedup');
+    assert.strictEqual(sim3.mitigationCertified, true);
   });
 
   test('Canary probe runs through infer and catches contaminated state', () => {
@@ -959,6 +1031,796 @@ describe('Task 10: Endpoint Coverage and Platform Integrity', () => {
     assert.strictEqual(res.status, 400);
   });
 });
+
+describe('Task 1 Follow-up: Dashboard Response-Shape Unit Tests & Contract Flow', () => {
+  const appModule = require('../public/js/app');
+
+  test('Pure response parsers handle valid shapes and reject invalid or missing fields', () => {
+    // 1. Session Setup
+    assert.throws(() => appModule.parseSessionSetupResponse({}));
+    const setup = appModule.parseSessionSetupResponse({ sessionId: 'sess_123' });
+    assert.strictEqual(setup.sessionId, 'sess_123');
+
+    // 2. Token Response
+    assert.throws(() => appModule.parseSessionTokenResponse({}));
+    const tokenParsed = appModule.parseSessionTokenResponse({ token: { tid: 't1' }, role: 'red' });
+    assert.deepStrictEqual(tokenParsed.token, { tid: 't1' });
+    assert.strictEqual(tokenParsed.role, 'red');
+
+    // 3. Red Turn Response: strictly ACCEPTED, no verdict fields
+    assert.throws(() => appModule.parseRedTurnResponse({ phase: 'FAILED' }));
+    const redTurn = appModule.parseRedTurnResponse({
+      sessionId: 'sess_123',
+      phase: 'ACCEPTED',
+      isJailbreak: true
+    });
+    assert.strictEqual(redTurn.phase, 'ACCEPTED');
+    assert.strictEqual(redTurn.sessionId, 'sess_123');
+    assert.strictEqual(redTurn.isJailbreak, undefined);
+
+    // 4. Model Output
+    assert.throws(() => appModule.parseModelOutputResponse(null));
+    const modelOut = appModule.parseModelOutputResponse({ sessionId: 'sess_123', phase: 'BLUE_TURN', modelOutput: 'clean text' });
+    assert.strictEqual(modelOut.modelOutput, 'clean text');
+
+    // 5. Blue Turn
+    assert.throws(() => appModule.parseBlueTurnResponse(null));
+    const blueTurn = appModule.parseBlueTurnResponse({ sessionId: 'sess_123', phase: 'CONCLUDE' });
+    assert.strictEqual(blueTurn.phase, 'CONCLUDE');
+
+    // 6. Coarse Status
+    assert.throws(() => appModule.parseCoarseStatusResponse(null));
+    const coarse = appModule.parseCoarseStatusResponse({ sessionId: 'sess_123', phase: 'CONCLUDE', status: 'PASS' });
+    assert.strictEqual(coarse.status, 'PASS');
+
+    // 7. Disclosure
+    assert.throws(() => appModule.parseDisclosureResponse(null));
+    const disc = appModule.parseDisclosureResponse({
+      sessionId: 'sess_123',
+      disclosurePolicy: 'REDACTED_DEFENSE',
+      disclosedAttackPayload: '[REDACTED]',
+      certifiedIntegrity: { certified: true, verdict: 'CERTIFIED_SAFETY_FINDING' }
+    });
+    assert.strictEqual(disc.disclosurePolicy, 'REDACTED_DEFENSE');
+    assert.strictEqual(disc.certifiedIntegrity.certified, true);
+
+    // 8. Error Formatter
+    const demoErr = { status: 404, message: 'Not found' };
+    assert.strictEqual(appModule.formatApiError(demoErr, '/api/poc-tests'), 'Demo endpoints are disabled on this server');
+    const authErr = { status: 401, message: 'Auth failed' };
+    assert.strictEqual(appModule.formatApiError(authErr), 'Auth failed');
+  });
+
+  test('Server-side contract test walks exact sequence of UI calls and asserts 200 for every step', async () => {
+    // 1. POST /api/sessions with admin key
+    const resSetup = await fetch(`${baseUrl}/api/sessions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': process.env.ADMIN_API_KEY
+      },
+      body: JSON.stringify({ disclosurePolicy: 'REDACTED_DEFENSE' })
+    });
+    assert.strictEqual(resSetup.status, 200);
+    const setupData = await resSetup.json();
+    const sessionId = setupData.sessionId;
+    assert.ok(sessionId);
+
+    // 2. POST /api/sessions/:id/token with red key
+    const resRedToken = await fetch(`${baseUrl}/api/sessions/${sessionId}/token`, {
+      method: 'POST',
+      headers: { 'X-API-Key': process.env.RED_API_KEY }
+    });
+    assert.strictEqual(resRedToken.status, 200);
+    const redTokenData = await resRedToken.json();
+    const redToken = redTokenData.token;
+    assert.ok(redToken);
+
+    // 3. POST /api/sessions/:id/token with blue key
+    const resBlueToken = await fetch(`${baseUrl}/api/sessions/${sessionId}/token`, {
+      method: 'POST',
+      headers: { 'X-API-Key': process.env.BLUE_API_KEY }
+    });
+    assert.strictEqual(resBlueToken.status, 200);
+    const blueTokenData = await resBlueToken.json();
+    const blueToken = blueTokenData.token;
+    assert.ok(blueToken);
+
+    // 4. POST /api/sessions/:id/red-turn with red key and red token
+    const resRedTurn = await fetch(`${baseUrl}/api/sessions/${sessionId}/red-turn`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': process.env.RED_API_KEY,
+        'Authorization': `Bearer ${JSON.stringify(redToken)}`
+      },
+      body: JSON.stringify({ payloadText: 'Benign baseline safety test', token: redToken })
+    });
+    assert.strictEqual(resRedTurn.status, 200);
+    const redTurnData = await resRedTurn.json();
+    assert.strictEqual(redTurnData.phase, 'ACCEPTED');
+
+    // 5. GET /api/sessions/:id/model-output with blue key
+    const resModelOutput = await fetch(`${baseUrl}/api/sessions/${sessionId}/model-output`, {
+      method: 'GET',
+      headers: { 'X-API-Key': process.env.BLUE_API_KEY }
+    });
+    assert.strictEqual(resModelOutput.status, 200);
+    const modelOutData = await resModelOutput.json();
+    assert.ok(modelOutData.modelOutput !== undefined);
+
+    // 6. POST /api/sessions/:id/blue-turn with blue key and blue token
+    const resBlueTurn = await fetch(`${baseUrl}/api/sessions/${sessionId}/blue-turn`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': process.env.BLUE_API_KEY,
+        'Authorization': `Bearer ${JSON.stringify(blueToken)}`
+      },
+      body: JSON.stringify({ token: blueToken, verdict: 'SAFE' })
+    });
+    assert.strictEqual(resBlueTurn.status, 200);
+
+    // 7. GET /api/sessions/:id/coarse-status with red key
+    const resCoarse = await fetch(`${baseUrl}/api/sessions/${sessionId}/coarse-status`, {
+      method: 'GET',
+      headers: {
+        'X-API-Key': process.env.RED_API_KEY,
+        'Authorization': `Bearer ${JSON.stringify(redToken)}`
+      }
+    });
+    assert.strictEqual(resCoarse.status, 200);
+    const coarseData = await resCoarse.json();
+    assert.ok(coarseData.status);
+
+    // 8. GET /api/sessions/:id/disclosure with blue key and Authorization Bearer
+    const resDisc = await fetch(`${baseUrl}/api/sessions/${sessionId}/disclosure`, {
+      method: 'GET',
+      headers: {
+        'X-API-Key': process.env.BLUE_API_KEY,
+        'Authorization': `Bearer ${JSON.stringify(blueToken)}`
+      }
+    });
+    assert.strictEqual(resDisc.status, 200);
+    const discData = await resDisc.json();
+    assert.strictEqual(discData.disclosurePolicy, 'REDACTED_DEFENSE');
+    assert.ok(discData.certifiedIntegrity);
+  });
+});
+
+describe('Task 2 & 3 Follow-up: Token Preservation, Atomic Transitions & Audit Cleanliness', () => {
+  test('Blue calls disclosure in RED_TURN and gets denied, then calls again after CONCLUDE and succeeds', async () => {
+    // 1. Setup session
+    const resSetup = await fetch(`${baseUrl}/api/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.ADMIN_API_KEY },
+      body: JSON.stringify({ disclosurePolicy: 'REDACTED_DEFENSE' })
+    });
+    const { sessionId } = await resSetup.json();
+
+    // 2. Fetch tokens
+    const resRedToken = await fetch(`${baseUrl}/api/sessions/${sessionId}/token`, {
+      method: 'POST',
+      headers: { 'X-API-Key': process.env.RED_API_KEY }
+    });
+    const { token: redToken } = await resRedToken.json();
+
+    const resBlueToken = await fetch(`${baseUrl}/api/sessions/${sessionId}/token`, {
+      method: 'POST',
+      headers: { 'X-API-Key': process.env.BLUE_API_KEY }
+    });
+    const { token: blueToken } = await resBlueToken.json();
+
+    // 3. Premature call: Blue calls disclosure in RED_TURN -> should fail with 403 (canonical)
+    const prematureRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/disclosure`, {
+      headers: {
+        'X-API-Key': process.env.BLUE_API_KEY,
+        'Authorization': `Bearer ${JSON.stringify(blueToken)}`
+      }
+    });
+    assert.strictEqual(prematureRes.status, 403);
+
+    // 4. Progress session through RED_TURN -> MODEL_INFERENCE -> BLUE_TURN -> CONCLUDE
+    const redTurnRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/red-turn`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': process.env.RED_API_KEY,
+        'Authorization': `Bearer ${JSON.stringify(redToken)}`
+      },
+      body: JSON.stringify({ payloadText: 'test attack probe', token: redToken })
+    });
+    assert.strictEqual(redTurnRes.status, 200);
+
+    const blueTurnRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/blue-turn`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': process.env.BLUE_API_KEY,
+        'Authorization': `Bearer ${JSON.stringify(blueToken)}`
+      },
+      body: JSON.stringify({ token: blueToken, verdict: 'SAFE' })
+    });
+    assert.strictEqual(blueTurnRes.status, 200);
+
+    // 5. Legitimate call: Blue calls disclosure again in CONCLUDE with the SAME token -> must SUCCEED (200)!
+    const legitRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/disclosure`, {
+      headers: {
+        'X-API-Key': process.env.BLUE_API_KEY,
+        'Authorization': `Bearer ${JSON.stringify(blueToken)}`
+      }
+    });
+    assert.strictEqual(legitRes.status, 200);
+    const bundle = await legitRes.json();
+    assert.strictEqual(bundle.disclosurePolicy, 'REDACTED_DEFENSE');
+
+    // 6. Repeated disclosure request with the same consumed token is now REJECTED (403)
+    const repeatedRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/disclosure`, {
+      headers: {
+        'X-API-Key': process.env.BLUE_API_KEY,
+        'Authorization': `Bearer ${JSON.stringify(blueToken)}`
+      }
+    });
+    assert.strictEqual(repeatedRes.status, 403);
+  });
+
+  test('Two concurrent red-turn submissions: exactly one succeeds and exactly one ATTACK_PAYLOAD_SUBMITTED entry exists', async () => {
+    // 1. Setup session
+    const resSetup = await fetch(`${baseUrl}/api/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.ADMIN_API_KEY },
+      body: JSON.stringify({ disclosurePolicy: 'REDACTED_DEFENSE' })
+    });
+    const { sessionId } = await resSetup.json();
+
+    const resRedToken = await fetch(`${baseUrl}/api/sessions/${sessionId}/token`, {
+      method: 'POST',
+      headers: { 'X-API-Key': process.env.RED_API_KEY }
+    });
+    const { token: redToken } = await resRedToken.json();
+
+    // Fire 2 concurrent red-turn submissions with the same token
+    const p1 = fetch(`${baseUrl}/api/sessions/${sessionId}/red-turn`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': process.env.RED_API_KEY,
+        'Authorization': `Bearer ${JSON.stringify(redToken)}`
+      },
+      body: JSON.stringify({ payloadText: 'concurrent attack 1', token: redToken })
+    });
+    const p2 = fetch(`${baseUrl}/api/sessions/${sessionId}/red-turn`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': process.env.RED_API_KEY,
+        'Authorization': `Bearer ${JSON.stringify(redToken)}`
+      },
+      body: JSON.stringify({ payloadText: 'concurrent attack 2', token: redToken })
+    });
+
+    const [r1, r2] = await Promise.all([p1, p2]);
+    const statuses = [r1.status, r2.status].sort();
+    // Exactly one succeeds (200), the other is rejected (403)
+    assert.strictEqual(statuses[0], 200, 'One concurrent submission must succeed');
+    assert.strictEqual(statuses[1], 403, 'The other concurrent submission must be rejected');
+
+    // Query audit log for this session: exactly ONE ATTACK_PAYLOAD_SUBMITTED entry exists
+    const auditRes = await fetch(`${baseUrl}/api/audit?sessionId=${sessionId}`, {
+      headers: { 'X-API-Key': process.env.AUDITOR_API_KEY }
+    });
+    const auditData = await auditRes.json();
+    const attackEntries = auditData.records.filter(r => r.sessionId === sessionId && r.eventType === 'ATTACK_PAYLOAD_SUBMITTED');
+    assert.strictEqual(attackEntries.length, 1, `Expected exactly 1 ATTACK_PAYLOAD_SUBMITTED entry, found ${attackEntries.length}`);
+  });
+
+  test('40 wrong-phase blue calls add 0 audit entries', async () => {
+    // 1. Setup session in RED_TURN
+    const resSetup = await fetch(`${baseUrl}/api/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.ADMIN_API_KEY },
+      body: JSON.stringify({ disclosurePolicy: 'REDACTED_DEFENSE' })
+    });
+    const { sessionId } = await resSetup.json();
+
+    const resBlueToken = await fetch(`${baseUrl}/api/sessions/${sessionId}/token`, {
+      method: 'POST',
+      headers: { 'X-API-Key': process.env.BLUE_API_KEY }
+    });
+    const { token: blueToken } = await resBlueToken.json();
+
+    // Read initial audit record count for this session
+    const initAuditRes = await fetch(`${baseUrl}/api/audit?sessionId=${sessionId}`, {
+      headers: { 'X-API-Key': process.env.AUDITOR_API_KEY }
+    });
+    const initAudit = await initAuditRes.json();
+    const countBefore = initAudit.records.filter(r => r.sessionId === sessionId).length;
+
+    // Send 40 wrong-phase blue calls (calling blue-turn during RED_TURN)
+    const calls = [];
+    for (let i = 0; i < 40; i++) {
+      calls.push(
+        fetch(`${baseUrl}/api/sessions/${sessionId}/blue-turn`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-API-Key': process.env.BLUE_API_KEY,
+            'Authorization': `Bearer ${JSON.stringify(blueToken)}`
+          },
+          body: JSON.stringify({ token: blueToken, verdict: 'SAFE' })
+        })
+      );
+    }
+    const results = await Promise.all(calls);
+    for (const r of results) {
+      assert.strictEqual(r.status, 403);
+    }
+
+    // Assert audit log for this session grew by 0 entries
+    const postAuditRes = await fetch(`${baseUrl}/api/audit?sessionId=${sessionId}`, {
+      headers: { 'X-API-Key': process.env.AUDITOR_API_KEY }
+    });
+    const postAudit = await postAuditRes.json();
+    const countAfter = postAudit.records.filter(r => r.sessionId === sessionId).length;
+    assert.strictEqual(countAfter, countBefore, '40 wrong-phase blue calls must add 0 audit entries');
+  });
+
+  test('Flood of unauthenticated or invalid-token calls adds 0 entries', async () => {
+    const resSetup = await fetch(`${baseUrl}/api/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.ADMIN_API_KEY },
+      body: JSON.stringify({ disclosurePolicy: 'REDACTED_DEFENSE' })
+    });
+    const { sessionId } = await resSetup.json();
+
+    const initAuditRes = await fetch(`${baseUrl}/api/audit?sessionId=${sessionId}`, {
+      headers: { 'X-API-Key': process.env.AUDITOR_API_KEY }
+    });
+    const initAudit = await initAuditRes.json();
+    const countBefore = initAudit.records.filter(r => r.sessionId === sessionId).length;
+
+    // Send flood of unauthenticated and invalid-token calls
+    const calls = [];
+    for (let i = 0; i < 20; i++) {
+      calls.push(fetch(`${baseUrl}/api/sessions/${sessionId}/red-turn`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ payloadText: 'unauth payload' })
+      }));
+      calls.push(fetch(`${baseUrl}/api/sessions/${sessionId}/red-turn`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': process.env.RED_API_KEY
+        },
+        body: JSON.stringify({ payloadText: 'bad token payload', token: { fake: 'token' } })
+      }));
+    }
+    await Promise.all(calls);
+
+    const postAuditRes = await fetch(`${baseUrl}/api/audit?sessionId=${sessionId}`, {
+      headers: { 'X-API-Key': process.env.AUDITOR_API_KEY }
+    });
+    const postAudit = await postAuditRes.json();
+    const countAfter = postAudit.records.filter(r => r.sessionId === sessionId).length;
+    assert.strictEqual(countAfter, countBefore, 'Flood of invalid calls must add 0 audit entries');
+  });
+});
+
+describe('Task 4: Audit Store Scale, Incremental Merkle & Persistence', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const os = require('os');
+  const WormAuditStore = require('../src/audit/worm_store');
+
+  test('Restart test: append, close, tamper disk file, reopen, and expect load to fail', () => {
+    const tempFile = path.join(os.tmpdir(), `bayora_tamper_disk_${Date.now()}_${Math.random().toString(36).slice(2)}.jsonl`);
+    const anchorSecret = '01234567890123456789012345678901';
+    const store = new WormAuditStore(anchorSecret, tempFile);
+
+    store.append({ sessionId: 's1', tenant: 'red', eventType: 'ATTACK_PAYLOAD_SUBMITTED', payload: 'p1' });
+    store.append({ sessionId: 's1', tenant: 'blue', eventType: 'DEFENSE_EVALUATED', payload: 'p2' });
+    store.append({ sessionId: 's1', tenant: 'SYSTEM', eventType: 'CONCLUDE', payload: 'p3' });
+
+    assert.strictEqual(store.verifyIntegrity().isValid, true);
+    assert.ok(store.anchors.length > 0, 'Must have written an anchor for CONCLUDE');
+
+    // Tamper with the raw log file on disk
+    const content = fs.readFileSync(tempFile, 'utf8');
+    const tamperedContent = content.replace('ATTACK_PAYLOAD_SUBMITTED', 'FORGED_ATTACK_SUBMITTED');
+    fs.writeFileSync(tempFile, tamperedContent, 'utf8');
+
+    // Reopen and assert load throws WORM_INTEGRITY_VIOLATION
+    assert.throws(() => {
+      new WormAuditStore(anchorSecret, tempFile);
+    }, (err) => {
+      return err.message.includes('WORM_INTEGRITY_VIOLATION') || err.message.includes('INVALID_EVENT_TYPE');
+    }, 'Reopening tampered log file must fail');
+
+    // Clean up
+    try { fs.unlinkSync(tempFile); } catch (e) {}
+    try { fs.unlinkSync(store.anchorsPath); } catch (e) {}
+  });
+
+  test('Timing test: 100 appends take under 1s and 5,000-entry chain verifies in under 1s', () => {
+    const store = new WormAuditStore();
+
+    // 100 appends timing
+    const t0 = Date.now();
+    for (let i = 0; i < 100; i++) {
+      store.append({ sessionId: `sess_${i}`, tenant: 'SYSTEM', eventType: 'STATE_TRANSITION', payload: { step: i } });
+    }
+    const elapsedAppends = Date.now() - t0;
+    assert.ok(elapsedAppends < 1000, `100 appends took ${elapsedAppends}ms, expected < 1000ms`);
+
+    // Scale to 5,000 entries
+    for (let i = 100; i < 4999; i++) {
+      store.append({ sessionId: `sess_${i}`, tenant: 'SYSTEM', eventType: 'STATE_TRANSITION', payload: { step: i } });
+    }
+    store.append({ sessionId: 'sess_final', tenant: 'SYSTEM', eventType: 'CONCLUDE', payload: { done: true } });
+    assert.strictEqual(store.chain.length, 5001); // 1 genesis + 5000 appends
+
+    // Verify 5,000+ entries timing
+    const tVerify0 = Date.now();
+    const result = store.verifyIntegrity();
+    const elapsedVerify = Date.now() - tVerify0;
+
+    assert.strictEqual(result.isValid, true, '5,000-entry chain must verify valid');
+    assert.ok(elapsedVerify < 1000, `5,000-entry chain verification took ${elapsedVerify}ms, expected < 1000ms`);
+  });
+
+  test('/api/audit pagination (limit & offset) and /api/audit/integrity', async () => {
+    // Pagination test
+    const pageRes = await fetch(`${baseUrl}/api/audit?limit=2&offset=1`, {
+      headers: { 'X-API-Key': process.env.AUDITOR_API_KEY }
+    });
+    assert.strictEqual(pageRes.status, 200);
+    const pageData = await pageRes.json();
+    assert.strictEqual(pageData.records.length, 2);
+    assert.strictEqual(typeof pageData.anchorCount, 'number');
+    assert.ok(pageData.latestAnchor !== undefined);
+
+    // Integrity endpoint test
+    const intRes = await fetch(`${baseUrl}/api/audit/integrity`, {
+      headers: { 'X-API-Key': process.env.AUDITOR_API_KEY }
+    });
+    assert.strictEqual(intRes.status, 200);
+    const intData = await intRes.json();
+    assert.strictEqual(intData.isValid, true);
+  });
+});
+
+describe('Task 5: Production Deployment and Startup Security Checks', () => {
+  const { validateProductionSecrets } = require('../src/security/auth');
+  const VaultAuthority = require('../src/security/vault_authority');
+  const WormAuditStore = require('../src/audit/worm_store');
+
+  test('Startup check refuses known-example values in production', () => {
+    // 1. Refuse known-example VAULT_SECRET
+    assert.throws(() => {
+      validateProductionSecrets({
+        NODE_ENV: 'production',
+        VAULT_SECRET: 'bayora_production_vault_secret_min_32_characters_long'
+      });
+    }, /Insecure known-example secret detected for VAULT_SECRET/);
+
+    // 2. Refuse known-example WORM_ANCHOR_SECRET
+    assert.throws(() => {
+      validateProductionSecrets({
+        NODE_ENV: 'production',
+        WORM_ANCHOR_SECRET: 'bayora_production_worm_secret_min_32_characters_long'
+      });
+    }, /Insecure known-example secret detected for WORM_ANCHOR_SECRET/);
+
+    // 3. Refuse known-example API keys
+    assert.throws(() => {
+      validateProductionSecrets({
+        NODE_ENV: 'production',
+        RED_API_KEY: 'red_dev_key_example_secret_1234567890'
+      });
+    }, /Insecure known-example secret detected for RED_API_KEY/);
+
+    assert.throws(() => {
+      validateProductionSecrets({
+        NODE_ENV: 'production',
+        BLUE_API_KEY: 'blue_dev_key_example_secret_1234567890'
+      });
+    }, /Insecure known-example secret detected for BLUE_API_KEY/);
+
+    assert.throws(() => {
+      validateProductionSecrets({
+        NODE_ENV: 'production',
+        AUDITOR_API_KEY: 'auditor_dev_key_example_secret_1234567890'
+      });
+    }, /Insecure known-example secret detected for AUDITOR_API_KEY/);
+
+    assert.throws(() => {
+      validateProductionSecrets({
+        NODE_ENV: 'production',
+        ADMIN_API_KEY: 'admin_dev_key_example_secret_1234567890'
+      });
+    }, /Insecure known-example secret detected for ADMIN_API_KEY/);
+  });
+
+  test('VaultAuthority and WormAuditStore refuse known-example secrets in production', () => {
+    const prevEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    try {
+      assert.throws(() => {
+        new VaultAuthority('bayora_production_vault_secret_min_32_characters_long');
+      }, /Insecure known-example secret detected for VAULT_SECRET/);
+
+      assert.throws(() => {
+        new WormAuditStore('bayora_production_worm_secret_min_32_characters_long');
+      }, /Insecure known-example secret detected for WORM_ANCHOR_SECRET/);
+    } finally {
+      process.env.NODE_ENV = prevEnv;
+    }
+  });
+
+  test('Production secrets pass when strong random values are provided', () => {
+    assert.doesNotThrow(() => {
+      validateProductionSecrets({
+        NODE_ENV: 'production',
+        VAULT_SECRET: 'a_very_strong_random_secret_that_is_at_least_32_chars_long_123',
+        WORM_ANCHOR_SECRET: 'another_very_strong_random_secret_32_chars_long_456',
+        RED_API_KEY: 'secure_red_random_hex_key_abc123456789',
+        BLUE_API_KEY: 'secure_blue_random_hex_key_abc123456789',
+        AUDITOR_API_KEY: 'secure_auditor_random_hex_key_abc123456789',
+        ADMIN_API_KEY: 'secure_admin_random_hex_key_abc123456789'
+      });
+    });
+  });
+});
+
+describe('Task 6: Open Security Gaps - Token Enforcement, Canonical Responses, and Tamper-Proof Lifetime', () => {
+  const VaultAuthority = require('../src/security/vault_authority');
+
+  test('GET /api/sessions/:id/coarse-status requires capability token and consumes it only on success', async () => {
+    // 1. Setup session
+    const sRes = await fetch(`${baseUrl}/api/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.ADMIN_API_KEY },
+      body: JSON.stringify({ disclosurePolicy: 'REDACTED_DEFENSE' })
+    });
+    const { sessionId } = await sRes.json();
+
+    const redTokRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/token`, {
+      method: 'POST',
+      headers: { 'X-API-Key': process.env.RED_API_KEY }
+    });
+    const { token: redToken } = await redTokRes.json();
+
+    const blueTokRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/token`, {
+      method: 'POST',
+      headers: { 'X-API-Key': process.env.BLUE_API_KEY }
+    });
+    const { token: blueToken } = await blueTokRes.json();
+
+    // Call coarse-status without token -> 403 canonical error
+    const noTokRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/coarse-status`, {
+      headers: { 'X-API-Key': process.env.RED_API_KEY }
+    });
+    assert.strictEqual(noTokRes.status, 403);
+    const noTokBody = await noTokRes.json();
+    assert.strictEqual(noTokBody.code, 'SEC_ERR_01');
+
+    // Complete red turn and blue turn to reach CONCLUDE
+    await fetch(`${baseUrl}/api/sessions/${sessionId}/red-turn`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.RED_API_KEY },
+      body: JSON.stringify({ payloadText: 'test probe', token: redToken })
+    });
+    await fetch(`${baseUrl}/api/sessions/${sessionId}/blue-turn`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.BLUE_API_KEY },
+      body: JSON.stringify({ token: blueToken, verdict: 'SAFE' })
+    });
+
+    // Call coarse-status with valid redToken -> 200
+    const okRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/coarse-status`, {
+      headers: {
+        'X-API-Key': process.env.RED_API_KEY,
+        'Authorization': `Bearer ${JSON.stringify(redToken)}`
+      }
+    });
+    assert.strictEqual(okRes.status, 200);
+    const okData = await okRes.json();
+    assert.ok(okData.status === 'PASS' || okData.status === 'FAIL');
+
+    // Repeated call with the same consumed token -> 403
+    const repeatRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/coarse-status`, {
+      headers: {
+        'X-API-Key': process.env.RED_API_KEY,
+        'Authorization': `Bearer ${JSON.stringify(redToken)}`
+      }
+    });
+    assert.strictEqual(repeatRes.status, 403);
+  });
+
+  test('extractCapabilityToken rejects req.query.token and requires header', async () => {
+    const sRes = await fetch(`${baseUrl}/api/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.ADMIN_API_KEY },
+      body: JSON.stringify({ disclosurePolicy: 'REDACTED_DEFENSE' })
+    });
+    const { sessionId } = await sRes.json();
+
+    const blueTokRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/token`, {
+      method: 'POST',
+      headers: { 'X-API-Key': process.env.BLUE_API_KEY }
+    });
+    const { token: blueToken } = await blueTokRes.json();
+
+    // Passing token only in URL query parameter ?token=... is ignored and returns 403
+    const queryOnlyRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/disclosure?token=${encodeURIComponent(JSON.stringify(blueToken))}`, {
+      headers: { 'X-API-Key': process.env.BLUE_API_KEY }
+    });
+    assert.strictEqual(queryOnlyRes.status, 403);
+    const body = await queryOnlyRes.json();
+    assert.strictEqual(body.code, 'SEC_ERR_01');
+  });
+
+  test('Unify tenant error behaviour: invalid capability token in RED_TURN vs wrong phase return identical 403', async () => {
+    // 1. Session in RED_TURN phase
+    const sRes = await fetch(`${baseUrl}/api/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.ADMIN_API_KEY },
+      body: JSON.stringify({ disclosurePolicy: 'REDACTED_DEFENSE' })
+    });
+    const { sessionId: s1 } = await sRes.json();
+
+    // Call red-turn with forged token in RED_TURN phase
+    const resBadTokInPhase = await fetch(`${baseUrl}/api/sessions/${s1}/red-turn`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.RED_API_KEY },
+      body: JSON.stringify({ payloadText: 'test', token: { tokenId: 'forged_tok_123', signature: 'bad' } })
+    });
+    assert.strictEqual(resBadTokInPhase.status, 403);
+    const bodyBadTok = await resBadTokInPhase.json();
+
+    // 2. Advance session to BLUE_TURN phase
+    const redTokRes = await fetch(`${baseUrl}/api/sessions/${s1}/token`, {
+      method: 'POST',
+      headers: { 'X-API-Key': process.env.RED_API_KEY }
+    });
+    const { token: redToken } = await redTokRes.json();
+    await fetch(`${baseUrl}/api/sessions/${s1}/red-turn`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.RED_API_KEY },
+      body: JSON.stringify({ payloadText: 'legit turn', token: redToken })
+    });
+
+    // Call red-turn with forged token in wrong phase (BLUE_TURN)
+    const resBadTokWrongPhase = await fetch(`${baseUrl}/api/sessions/${s1}/red-turn`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.RED_API_KEY },
+      body: JSON.stringify({ payloadText: 'test', token: { tokenId: 'forged_tok_123', signature: 'bad' } })
+    });
+    assert.strictEqual(resBadTokWrongPhase.status, 403);
+    const bodyWrongPhase = await resBadTokWrongPhase.json();
+
+    // Both must return identical canonical error code and body shape (no phase information leakage)
+    assert.strictEqual(bodyBadTok.code, bodyWrongPhase.code);
+    assert.strictEqual(bodyBadTok.message, bodyWrongPhase.message);
+  });
+
+  test('initialIssuedAt is cryptographically signed and cannot be forged to bypass lifetime cap', () => {
+    const vault = new VaultAuthority('TEST_VAULT_KEY_32_CHARS_LONG_123456');
+    vault.allowRefresh = true;
+    vault.maxLifetimeMs = 1000; // 1 second max lifetime
+
+    const originalToken = vault.issueToken({
+      tenantId: 'red',
+      sessionId: 'sess_tamper_lifetime',
+      allowedActions: ['submit_attack']
+    });
+
+    // Client attempts to tamper with initialIssuedAt to reset lifetime
+    const tamperedToken = { ...originalToken, initialIssuedAt: Date.now() + 100000 };
+    const valTampered = vault.validateCapability(tamperedToken, 'submit_attack', 'sess_tamper_lifetime', 'red');
+    assert.strictEqual(valTampered.valid, false);
+    assert.strictEqual(valTampered.reason, 'INVALID_SIGNATURE');
+
+    // Simulate expired lifetime using server-side record
+    const pastTime = Date.now() - 2000;
+    const oldToken = vault.issueToken({
+      tenantId: 'red',
+      sessionId: 'sess_expired_lifetime',
+      allowedActions: ['submit_attack'],
+      initialIssuedAt: pastTime
+    });
+
+    const refreshResult = vault.refreshToken(oldToken);
+    assert.strictEqual(refreshResult.success, false);
+    assert(/E_MAX_LIFETIME_EXCEEDED/.test(refreshResult.reason));
+  });
+
+  test('Missing token on /disclosure and /red-payload-query returns 403 canonical error, not 401', async () => {
+    const sRes = await fetch(`${baseUrl}/api/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.ADMIN_API_KEY },
+      body: JSON.stringify({ disclosurePolicy: 'REDACTED_DEFENSE' })
+    });
+    const { sessionId } = await sRes.json();
+
+    // 1. Disclosure without token -> 403 canonical
+    const discRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/disclosure`, {
+      headers: { 'X-API-Key': process.env.BLUE_API_KEY }
+    });
+    assert.strictEqual(discRes.status, 403);
+    const discBody = await discRes.json();
+    assert.strictEqual(discBody.code, 'SEC_ERR_01');
+    assert.strictEqual(typeof discBody.message, 'string');
+
+    // 2. Red payload query without token -> 403 canonical
+    const queryRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/red-payload-query`, {
+      headers: { 'X-API-Key': process.env.BLUE_API_KEY }
+    });
+    assert.strictEqual(queryRes.status, 403);
+    const queryBody = await queryRes.json();
+    assert.strictEqual(queryBody.code, 'SEC_ERR_01');
+    assert.strictEqual(typeof queryBody.message, 'string');
+  });
+
+  test('README.md API table routes are strictly defined in src/server.js', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const readmeContent = fs.readFileSync(path.join(__dirname, '../README.md'), 'utf8');
+    const serverContent = fs.readFileSync(path.join(__dirname, '../src/server.js'), 'utf8');
+
+    // Extract table rows from REST API Reference section in README
+    const apiTableMatch = readmeContent.match(/## 🔌 REST API Reference[\s\S]*?(?=\n## |\n---|$)/);
+    assert.ok(apiTableMatch, 'REST API Reference section must exist in README.md');
+
+    const tableRows = apiTableMatch[0].match(/\| `(\/api\/[^`]+)`/g) || [];
+    assert.ok(tableRows.length > 0, 'API table must contain route definitions');
+
+    // Extract all route paths from server.js
+    const serverRoutes = new Set();
+    const routeRegex = /app\.(?:get|post|put|delete)\(\s*['"]([^'"]+)['"]/g;
+    let match;
+    while ((match = routeRegex.exec(serverContent)) !== null) {
+      serverRoutes.add(match[1]);
+    }
+
+    for (const row of tableRows) {
+      const endpoint = row.replace(/\| `|`/g, '').trim();
+      assert.ok(
+        serverRoutes.has(endpoint),
+        `README.md lists endpoint '${endpoint}' which is not defined in src/server.js`
+      );
+    }
+  });
+
+  test('Additional demo and dataset endpoints in server.js execute properly', async () => {
+    // GET /api/datasets/samples
+    const resSamples = await fetch(`${baseUrl}/api/datasets/samples`);
+    assert.strictEqual(resSamples.status, 200);
+    const samplesData = await resSamples.json();
+    assert(Array.isArray(samplesData.samples));
+
+    // GET /api/datasets/:id (200 & 404)
+    const resAdv = await fetch(`${baseUrl}/api/datasets/advbench`);
+    assert.strictEqual(resAdv.status, 200);
+    const resNone = await fetch(`${baseUrl}/api/datasets/nonexistent_dataset_99`);
+    assert.strictEqual(resNone.status, 404);
+
+    // GET /api/attack-sims & POST /api/attack-sims/:id/run
+    const resSims = await fetch(`${baseUrl}/api/attack-sims`, {
+      headers: { 'X-API-Key': process.env.ADMIN_API_KEY }
+    });
+    assert.strictEqual(resSims.status, 200);
+
+    const resSimRun = await fetch(`${baseUrl}/api/attack-sims/sim-1/run`, {
+      method: 'POST',
+      headers: { 'X-API-Key': process.env.ADMIN_API_KEY }
+    });
+    assert.strictEqual(resSimRun.status, 200);
+  });
+});
+
+
 
 
 

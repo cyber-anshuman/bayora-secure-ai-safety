@@ -90,7 +90,7 @@ class OpaPolicyEngine {
   /**
    * Evaluate Data/Information Flow Request (§F: Information-Flow Matrix)
    */
-  evaluateInformationFlow({ source, destination, requestType, sessionPhase, disclosurePolicy }) {
+  evaluateInformationFlow({ source: _source, destination, requestType, sessionPhase, disclosurePolicy }) {
     // 1. Blue trying to see Red payload before CONCLUDE
     if (destination === 'blue' && requestType === 'READ_RED_PAYLOAD') {
       if (sessionPhase !== 'CONCLUDE' && sessionPhase !== 'DISCLOSURE') {

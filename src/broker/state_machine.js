@@ -9,6 +9,7 @@ const crypto = require('crypto');
 const DedicatedInferenceWorker = require('../model/inference_worker');
 const EvaluationIntegrityEngine = require('../eval/integrity');
 const sideChannelMitigations = require('../sidechannel/mitigations');
+const benchmarkRegistry = require('../datasets/benchmark_registry');
 
 class BrokerStateMachine {
   constructor(auditStore, opaPdp, vaultAuthority) {
@@ -64,7 +65,7 @@ class BrokerStateMachine {
    * STEP 1: SETUP
    * Initializes a fresh session with non-monotonic UUIDs and dedicated worker.
    */
-  async createSession(disclosurePolicy = 'REDACTED_DEFENSE', creatorRole = 'broker') {
+  async createSession(disclosurePolicy = 'REDACTED_DEFENSE', creatorRole = 'broker', datasetName = 'advbench') {
     this.evictExpiredSessions();
 
     if (this.sessions.size >= this.maxSessions) {
@@ -102,7 +103,6 @@ class BrokerStateMachine {
 
     // Generate UUIDv4 to avoid monotonic counter leakage (§X)
     const sessionId = `sess_${crypto.randomUUID()}`;
-    const startTime = Date.now();
 
     // Instantiate fresh, non-shared inference worker
     const worker = new DedicatedInferenceWorker();
@@ -119,13 +119,15 @@ class BrokerStateMachine {
     const blueToken = this.vault.issueToken({
       tenantId: 'blue',
       sessionId,
-      allowedActions: ['submit_defense', 'read_coarse_status', 'read_disclosure']
+      allowedActions: ['submit_defense', 'read_coarse_status', 'read_disclosure', 'read_red_payload']
     });
 
     const session = {
       sessionId,
       phase: 'SETUP',
       disclosurePolicy,
+      datasetName: datasetName !== undefined ? datasetName : 'advbench',
+      isolationTier: 'worker_threads_v8_limits',
       worker,
       redPayload: null,
       modelResponse: null,
@@ -204,10 +206,11 @@ class BrokerStateMachine {
       err.code = 'E_AUTH_FAILED';
       throw err;
     }
-    this.vault.consumeAction(token, 'submit_attack');
 
-    session.redPayload = payloadText;
+    // ATOMIC: Consume capability action and change phase with NO await between them
+    this.vault.consumeAction(token, 'submit_attack');
     session.phase = 'MODEL_INFERENCE';
+    session.redPayload = payloadText;
 
     this.audit.append({
       sessionId,
@@ -218,7 +221,8 @@ class BrokerStateMachine {
       details: { payloadDigest: crypto.createHash('sha256').update(payloadText).digest('hex') }
     });
 
-    // Automatically trigger model inference
+    // Note on worker failure: If the inference worker throws, session.phase is set to INFRA_FAILURE
+    // and the token remains spent to prevent replay loops against failing infrastructure (§K).
     await this._executeModelInference(sessionId);
 
     // Red receives only coarse acceptance; verdict and timing details are hidden
@@ -232,13 +236,22 @@ class BrokerStateMachine {
    * STEP 3 & 4: MODEL_INFERENCE & EVAL
    * Dispatches payload to dedicated model worker, runs canary check, evaluates integrity.
    */
-  async _executeModelInference(sessionId, options = {}) {
+  async _executeModelInference(sessionId, _options = {}) {
     const session = this.sessions.get(sessionId);
     const startTs = Date.now();
 
     try {
       // 1. Run inference on isolated worker (ignore client options to prevent contamination injection)
+      const startCpu = process.cpuUsage();
+      const startHrTime = process.hrtime.bigint();
       const inferResult = session.worker.infer(session.redPayload);
+      const elapsedWallMicros = Number(process.hrtime.bigint() - startHrTime) / 1000;
+      const cpuDiff = process.cpuUsage(startCpu);
+      const totalCpuMicros = cpuDiff.user + cpuDiff.system;
+      const cpuPercent = elapsedWallMicros > 0
+        ? Math.min(100, Math.round((totalCpuMicros / elapsedWallMicros) * 100))
+        : 0;
+
       session.modelResponse = inferResult;
 
       // 2. Automated Canary Probe Verification (§K)
@@ -247,10 +260,8 @@ class BrokerStateMachine {
       // Measure real runtime resource consumption
       const mem = process.memoryUsage();
       const memPct = Math.min(100, Math.round((mem.heapUsed / mem.heapTotal) * 100));
-      const cpu = process.cpuUsage();
-      const cpuPct = Math.min(100, Math.round(((cpu.user + cpu.system) / 1000000) % 100));
       session.resourceConsumption = {
-        cpuPeak: Math.max(1, cpuPct),
+        cpuPeak: Math.max(1, cpuPercent),
         memoryPeak: Math.max(1, memPct),
         simulated: false
       };
@@ -258,15 +269,43 @@ class BrokerStateMachine {
       // Compute auditReconstructable: session entries exist and chain is valid
       const sessionEntries = this.audit.chain.filter(e => e.sessionId === sessionId);
       const hasRequestEntry = sessionEntries.some(e => e.tenant === 'red' || (e.payload && e.payload.from === 'RED_TURN'));
-      const chainValid = this.audit.verifyIntegrity().isValid;
+      const firstSessionEntry = sessionEntries[0];
+      const fromIndex = firstSessionEntry ? Math.max(0, firstSessionEntry.index - 1) : 0;
+      const chainValid = this.audit.verifyTail(fromIndex).isValid;
       const auditReconstructable = hasRequestEntry && chainValid;
+
+      // Compute observed config hash from real runtime configuration (§L)
+      const observedConfig = {
+        disclosurePolicy: session.disclosurePolicy,
+        isolationTier: session.isolationTier || 'worker_threads_v8_limits',
+        timingBucketMs: sideChannelMitigations.bucketIntervalMs || 250
+      };
+      const observedConfigHash = this.integrityEngine.computeConfigHash(observedConfig);
+
+      // Compute observed dataset hash from dataset the payload was drawn from
+      let observedDatasetHash = 'unknown';
+      if (session.datasetName) {
+        const ds = benchmarkRegistry.getDataset(session.datasetName);
+        if (ds && ds.snapshotHash) {
+          observedDatasetHash = ds.snapshotHash;
+        }
+      } else if (session.redPayload) {
+        const allSamples = benchmarkRegistry.getAllSamples();
+        const matched = allSamples.find(s => s.prompt === session.redPayload);
+        if (matched) {
+          const ds = benchmarkRegistry.getDataset(matched.datasetId);
+          if (ds && ds.snapshotHash) {
+            observedDatasetHash = ds.snapshotHash;
+          }
+        }
+      }
 
       // 3. Evaluation Integrity check (§L)
       const integrityVerdict = this.integrityEngine.evaluateFinding({
         canaryResult: canaryCheck,
         modelHash: session.worker._computeRuntimeWeightsHash(),
-        configHash: this.integrityEngine.expectedConfigHash,
-        datasetHash: this.integrityEngine.expectedDatasetHash,
+        configHash: observedConfigHash,
+        datasetHash: observedDatasetHash,
         infraErrors: session.infraErrors,
         retries: session.retries,
         resourceConsumption: session.resourceConsumption,
@@ -362,7 +401,10 @@ class BrokerStateMachine {
       err.code = 'E_AUTH_FAILED';
       throw err;
     }
+
+    // ATOMIC: Consume capability action and advance phase with NO await between them
     this.vault.consumeAction(token, 'submit_defense');
+    session.phase = 'CONCLUDE';
 
     let blueEvaluation = blueVerdictOrParams;
     if (typeof blueVerdictOrParams === 'object' && blueVerdictOrParams !== null) {
@@ -371,7 +413,6 @@ class BrokerStateMachine {
     }
 
     session.blueEvaluation = blueEvaluation;
-    session.phase = 'CONCLUDE';
 
     // Step 5 of lifecycle: DESTROY the inference worker instance (§K)
     session.worker.destroy();
@@ -411,15 +452,15 @@ class BrokerStateMachine {
       throw err;
     }
 
+    // 1. Validate capability (DO NOT CONSUME YET - must leave token unspent on early failure)
     const capCheck = this.vault.validateCapability(token, 'read_disclosure', sessionId, 'blue');
     if (!capCheck.valid) {
       const err = new Error(`Vault Deny: ${capCheck.reason}`);
       err.code = 'E_AUTH_FAILED';
       throw err;
     }
-    this.vault.consumeAction(token, 'read_disclosure');
 
-    // Check OPA information flow policy
+    // 2. Check OPA information flow policy
     const policyCheck = this.opa.evaluateInformationFlow({
       source: 'broker',
       destination: 'blue',
@@ -434,7 +475,15 @@ class BrokerStateMachine {
       throw err;
     }
 
-    // Advance to final state DISCLOSURE
+    // 3. Check session phase
+    if (session.phase !== 'CONCLUDE' && session.phase !== 'DISCLOSURE') {
+      const err = new Error(`State Machine Error: Cannot retrieve disclosure while in phase '${session.phase}'`);
+      err.code = 'E_STATE_MACHINE_ERROR';
+      throw err;
+    }
+
+    // 4. ATOMIC: Consume token action and advance phase with NO await between them
+    this.vault.consumeAction(token, 'read_disclosure');
     session.phase = 'DISCLOSURE';
 
     // Apply shared redaction based on policy (§F)
@@ -485,7 +534,11 @@ class BrokerStateMachine {
       };
     }
 
-    const capCheck = this.vault.validateCapability(token, 'read_disclosure', sessionId, 'blue');
+    // Validate capability: uses read_red_payload or falls back to read_disclosure
+    const action = (token && token.allowedActions && token.allowedActions.includes('read_red_payload'))
+      ? 'read_red_payload'
+      : 'read_disclosure';
+    const capCheck = this.vault.validateCapability(token, action, sessionId, 'blue');
     if (!capCheck.valid) {
       return {
         allowed: false,

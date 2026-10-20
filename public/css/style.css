@@ -242,6 +242,25 @@ code, pre, .mono {
   font-size: 0.72rem;
 }
 
+.keys-popover {
+  right: 0;
+  min-width: 290px;
+}
+
+.key-input {
+  background: var(--paper-muted);
+  border: 1px solid var(--rule-border);
+  border-radius: var(--radius-sm);
+  color: var(--ink-primary);
+  font-family: var(--font-mono);
+  transition: border-color 0.15s ease;
+}
+
+.key-input:focus {
+  border-color: var(--protocol-navy);
+  outline: none;
+}
+
 /* Role Perspective Select */
 .role-select-container {
   display: inline-flex;

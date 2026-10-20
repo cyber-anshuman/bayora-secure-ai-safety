@@ -15,7 +15,7 @@ async function run() {
 
   let allPassed = true;
 
-  results.forEach((r, idx) => {
+  results.forEach((r) => {
     const symbol = r.passed ? '✓ PASS' : '✗ FAIL';
     console.log(`[${symbol}] [${r.testId}] ${r.claim}`);
     if (!r.passed) {
