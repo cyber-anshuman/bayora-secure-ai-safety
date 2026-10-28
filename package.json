@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node src/server.js",
     "test": "npm run test:all",
-    "lint": "eslint src/ test/ --max-warnings 0",
+    "lint": "eslint src/ test/ api/ --max-warnings 0",
     "test:unit": "node test/weight_integrity.test.js && node test/subsystems_unit.test.js",
     "test:isolation": "node test/worker_isolation.test.js",
     "test:attacks": "node test/attack_sim_tests.js",
