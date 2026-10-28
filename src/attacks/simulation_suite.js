@@ -19,7 +19,7 @@ class AttackSimulationSuite {
   }
 
   _resetEnvironment() {
-    this.audit = new WormAuditStore();
+    this.audit = new WormAuditStore(null, ':memory:', { ephemeral: true });
     this.opa = new OpaPolicyEngine();
     this.vault = new VaultAuthority();
     this.broker = new BrokerStateMachine(this.audit, this.opa, this.vault);
@@ -205,7 +205,7 @@ class AttackSimulationSuite {
    * Test 7 (§S.7): Tamper-evident audit store (Hash chain & Merkle root divergence)
    */
   async testTamperEvidentAuditStore() {
-    const localAudit = new WormAuditStore();
+    const localAudit = new WormAuditStore(null, ':memory:', { ephemeral: true });
     localAudit.append({ sessionId: 's1', tenant: 'red', eventType: 'ATTACK_PAYLOAD_SUBMITTED', payload: 'clean data' });
     localAudit.append({ sessionId: 's1', tenant: 'blue', eventType: 'DEFENSE_EVALUATED', payload: 'clean defense' });
     localAudit.append({ sessionId: 's1', tenant: 'SYSTEM', eventType: 'CONCLUDE', payload: 'certified' });
@@ -546,7 +546,7 @@ class AttackSimulationSuite {
    * Attack Sim 5 (§T.5): WORM Audit Tamper & Merkle Divergence Simulation
    */
   async runAttackSim5_AuditTamper() {
-    const localAudit = new WormAuditStore();
+    const localAudit = new WormAuditStore(null, ':memory:', { ephemeral: true });
     for (let i = 0; i < 6; i++) {
       localAudit.append({ sessionId: `sess-${i}`, tenant: 'red', eventType: 'ATTACK_PAYLOAD_SUBMITTED', payload: { data: i } });
     }

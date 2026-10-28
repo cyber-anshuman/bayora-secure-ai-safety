@@ -5,6 +5,30 @@
  */
 
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+
+function loadLocalEnv() {
+  try {
+    const envPath = path.join(__dirname, '../../.env');
+    if (fs.existsSync(envPath)) {
+      const content = fs.readFileSync(envPath, 'utf8');
+      for (const rawLine of content.split('\n')) {
+        const line = rawLine.trim();
+        if (line && !line.startsWith('#') && line.includes('=')) {
+          const idx = line.indexOf('=');
+          const k = line.slice(0, idx).trim();
+          const v = line.slice(idx + 1).trim();
+          if (k && process.env[k] === undefined) {
+            process.env[k] = v;
+          }
+        }
+      }
+    }
+  } catch (_) {}
+}
+
+loadLocalEnv();
 
 const REQUIRED_KEY_VARS = [
   'RED_API_KEY',

@@ -74,8 +74,11 @@ class WormAuditStore {
     this.chain = [];
     this.anchors = []; // Merkle roots anchored externally
     this.merkleStack = []; // Stack of { size: 2^k, hash } for O(log n) incremental Merkle root computation
-    this.genesisHash = '0000000000000000000000000000000000000000000000000000000000000000';
-    this.storagePath = storagePath || process.env.WORM_STORAGE_PATH || null;
+    if (storagePath === ':memory:' || (options && options.ephemeral)) {
+      this.storagePath = null;
+    } else {
+      this.storagePath = storagePath || process.env.WORM_STORAGE_PATH || null;
+    }
     this.anchorsPath = this.storagePath
       ? (this.storagePath.endsWith('.jsonl') ? this.storagePath.replace(/\.jsonl$/, '.anchors.jsonl') : `${this.storagePath}.anchors.jsonl`)
       : null;
