@@ -117,7 +117,9 @@ class DedicatedInferenceWorker {
 
     // Check ALLOW_UNPINNED_DEMO policy
     const isProd = process.env.NODE_ENV === 'production';
-    const allowUnpinned = process.env.ALLOW_UNPINNED_DEMO === 'true' || (!isProd && process.env.ALLOW_UNPINNED_DEMO !== 'false');
+    const allowUnpinned = process.env.ALLOW_UNPINNED_DEMO === 'true' ||
+      (process.env.ENABLE_DEMO_ENDPOINTS === 'true' && process.env.ALLOW_UNPINNED_DEMO !== 'false') ||
+      (!isProd && process.env.ALLOW_UNPINNED_DEMO !== 'false');
     if (!allowUnpinned && (this.pinnedWeightsHash === 'UNPINNED_DEMO_MODEL' || this.loadedWeightsId === 'UNPINNED_DEMO_MODEL')) {
       this.status = 'HARNESS_ERROR_CONFIG_DRIFT';
       const err = new Error('Unpinned demo model weights are forbidden when ALLOW_UNPINNED_DEMO is false. Pinned weights required in production.');

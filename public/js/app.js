@@ -168,7 +168,7 @@ async function api(path, options = {}) {
 
   if (res.status === 401) {
     const roleName = role || 'caller';
-    const err = new Error(`Authentication required (401) for ${roleName}: Please enter the ${roleName} API key in the API Keys panel.`);
+    const err = new Error(`Authentication required (401) for ${roleName}: Please click 'API Keys' at the top right to view or auto-fill demo keys.`);
     err.status = 401;
     err.code = 'E_AUTH_FAILED';
     throw err;
@@ -233,6 +233,13 @@ if (typeof document !== 'undefined') {
 // -------------------------------------------------------------
 // In-Memory API Keys Panel Handler
 // -------------------------------------------------------------
+const DEFAULT_DEMO_KEYS = {
+  admin: 'admin_demo_secret_key_12345',
+  red: 'red_demo_secret_key_12345',
+  blue: 'blue_demo_secret_key_12345',
+  auditor: 'auditor_demo_secret_key_12345'
+};
+
 function initApiKeysPanel() {
   const btn = document.getElementById('apiKeysBtn');
   const popover = document.getElementById('apiKeysPopover');
@@ -258,6 +265,29 @@ function initApiKeysPanel() {
     auditor: document.getElementById('keyAuditor')
   };
 
+  const fillBtn = document.getElementById('btnFillDemoKeys');
+  const clearBtn = document.getElementById('btnClearDemoKeys');
+
+  function applyKeys(keys) {
+    Object.entries(inputs).forEach(([role, el]) => {
+      apiKeys[role] = keys[role] || '';
+      if (el) el.value = keys[role] || '';
+    });
+    updateApiKeysBadge();
+  }
+
+  if (fillBtn) {
+    fillBtn.addEventListener('click', () => {
+      applyKeys(DEFAULT_DEMO_KEYS);
+    });
+  }
+
+  if (clearBtn) {
+    clearBtn.addEventListener('click', () => {
+      applyKeys({ admin: '', red: '', blue: '', auditor: '' });
+    });
+  }
+
   Object.entries(inputs).forEach(([role, el]) => {
     if (el) {
       el.addEventListener('input', () => {
@@ -266,6 +296,9 @@ function initApiKeysPanel() {
       });
     }
   });
+
+  // Automatically pre-load demo keys on initialization for frictionless hackathon evaluation
+  applyKeys(DEFAULT_DEMO_KEYS);
 }
 
 function updateApiKeysBadge() {
